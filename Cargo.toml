@@ -78,3 +78,7 @@ pre-build = [
     "dpkg --add-architecture $CROSS_DEB_ARCH",
     "apt-get update && apt-get install --assume-yes libssl-dev:$CROSS_DEB_ARCH"
 ]
+
+[patch.'https://github.com/mamba-org/rattler']
+rattler_package_streaming = { git = "https://github.com/johnhany97/rattler", branch = "jayad/fix-tar" }
+rattler_networking = { git = "https://github.com/johnhany97/rattler", branch = "jayad/fix-tar" }

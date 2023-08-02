@@ -2208,8 +2208,8 @@ dependencies = [
  "nom",
  "once_cell",
  "pin-project-lite",
- "rattler_conda_types",
- "rattler_digest",
+ "rattler_conda_types 0.5.0 (git+https://github.com/mamba-org/rattler?branch=main)",
+ "rattler_digest 0.5.0 (git+https://github.com/mamba-org/rattler?branch=main)",
  "rattler_networking",
  "rattler_package_streaming",
  "regex",
@@ -2251,8 +2251,8 @@ dependencies = [
  "once_cell",
  "pathdiff",
  "rattler",
- "rattler_conda_types",
- "rattler_digest",
+ "rattler_conda_types 0.5.0 (git+https://github.com/mamba-org/rattler?branch=main)",
+ "rattler_digest 0.5.0 (git+https://github.com/mamba-org/rattler?branch=main)",
  "rattler_networking",
  "rattler_package_streaming",
  "rattler_repodata_gateway",
@@ -2281,7 +2281,7 @@ dependencies = [
 [[package]]
 name = "rattler_conda_types"
 version = "0.5.0"
-source = "git+https://github.com/mamba-org/rattler?branch=main#145373f284aa61180aa37618b1c9c01ca6809617"
+source = "git+https://github.com/johnhany97/rattler?branch=jayad/fix-tar#2a7802735e5cf6159f7d38eb17a43a41ce5882e5"
 dependencies = [
  "chrono",
  "fxhash",
@@ -2290,8 +2290,8 @@ dependencies = [
  "itertools",
  "lazy-regex",
  "nom",
- "rattler_digest",
- "rattler_macros",
+ "rattler_digest 0.5.0 (git+https://github.com/johnhany97/rattler?branch=jayad/fix-tar)",
+ "rattler_macros 0.5.0 (git+https://github.com/johnhany97/rattler?branch=jayad/fix-tar)",
  "regex",
  "serde",
  "serde-json-python-formatter",
@@ -2304,6 +2304,48 @@ dependencies = [
  "thiserror",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "rattler_conda_types"
+version = "0.5.0"
+source = "git+https://github.com/mamba-org/rattler?branch=main#145373f284aa61180aa37618b1c9c01ca6809617"
+dependencies = [
+ "chrono",
+ "fxhash",
+ "glob",
+ "hex",
+ "itertools",
+ "lazy-regex",
+ "nom",
+ "rattler_digest 0.5.0 (git+https://github.com/mamba-org/rattler?branch=main)",
+ "rattler_macros 0.5.0 (git+https://github.com/mamba-org/rattler?branch=main)",
+ "regex",
+ "serde",
+ "serde-json-python-formatter",
+ "serde_json",
+ "serde_repr",
+ "serde_with",
+ "serde_yaml",
+ "smallvec",
+ "strum 0.25.0",
+ "thiserror",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "rattler_digest"
+version = "0.5.0"
+source = "git+https://github.com/johnhany97/rattler?branch=jayad/fix-tar#2a7802735e5cf6159f7d38eb17a43a41ce5882e5"
+dependencies = [
+ "blake2",
+ "digest",
+ "hex",
+ "md-5",
+ "serde",
+ "serde_with",
+ "sha2",
 ]
 
 [[package]]
@@ -2337,6 +2379,15 @@ dependencies = [
 [[package]]
 name = "rattler_macros"
 version = "0.5.0"
+source = "git+https://github.com/johnhany97/rattler?branch=jayad/fix-tar#2a7802735e5cf6159f7d38eb17a43a41ce5882e5"
+dependencies = [
+ "quote",
+ "syn 2.0.26",
+]
+
+[[package]]
+name = "rattler_macros"
+version = "0.5.0"
 source = "git+https://github.com/mamba-org/rattler?branch=main#145373f284aa61180aa37618b1c9c01ca6809617"
 dependencies = [
  "quote",
@@ -2346,7 +2397,7 @@ dependencies = [
 [[package]]
 name = "rattler_networking"
 version = "0.5.0"
-source = "git+https://github.com/mamba-org/rattler?branch=main#145373f284aa61180aa37618b1c9c01ca6809617"
+source = "git+https://github.com/johnhany97/rattler?branch=jayad/fix-tar#2a7802735e5cf6159f7d38eb17a43a41ce5882e5"
 dependencies = [
  "anyhow",
  "dirs",
@@ -2363,14 +2414,14 @@ dependencies = [
 [[package]]
 name = "rattler_package_streaming"
 version = "0.5.0"
-source = "git+https://github.com/mamba-org/rattler?branch=main#145373f284aa61180aa37618b1c9c01ca6809617"
+source = "git+https://github.com/johnhany97/rattler?branch=jayad/fix-tar#2a7802735e5cf6159f7d38eb17a43a41ce5882e5"
 dependencies = [
  "bzip2",
  "chrono",
  "futures-util",
  "itertools",
- "rattler_conda_types",
- "rattler_digest",
+ "rattler_conda_types 0.5.0 (git+https://github.com/johnhany97/rattler?branch=jayad/fix-tar)",
+ "rattler_digest 0.5.0 (git+https://github.com/johnhany97/rattler?branch=jayad/fix-tar)",
  "rattler_networking",
  "reqwest",
  "serde_json",
@@ -2404,8 +2455,8 @@ dependencies = [
  "memmap2",
  "ouroboros",
  "pin-project-lite",
- "rattler_conda_types",
- "rattler_digest",
+ "rattler_conda_types 0.5.0 (git+https://github.com/mamba-org/rattler?branch=main)",
+ "rattler_digest 0.5.0 (git+https://github.com/mamba-org/rattler?branch=main)",
  "rattler_networking",
  "reqwest",
  "serde",
@@ -2429,7 +2480,7 @@ dependencies = [
  "enum_dispatch",
  "indexmap 2.0.0",
  "itertools",
- "rattler_conda_types",
+ "rattler_conda_types 0.5.0 (git+https://github.com/mamba-org/rattler?branch=main)",
  "serde_json",
  "shlex",
  "tempfile",
@@ -2445,8 +2496,8 @@ dependencies = [
  "anyhow",
  "hex",
  "libc",
- "rattler_conda_types",
- "rattler_digest",
+ "rattler_conda_types 0.5.0 (git+https://github.com/mamba-org/rattler?branch=main)",
+ "rattler_digest 0.5.0 (git+https://github.com/mamba-org/rattler?branch=main)",
  "rattler_libsolv_c",
  "serde",
  "tempfile",
@@ -2465,7 +2516,7 @@ dependencies = [
  "nom",
  "once_cell",
  "plist",
- "rattler_conda_types",
+ "rattler_conda_types 0.5.0 (git+https://github.com/mamba-org/rattler?branch=main)",
  "regex",
  "serde",
  "thiserror",

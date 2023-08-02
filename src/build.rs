@@ -178,7 +178,7 @@ pub async fn run_build(
     tracing::info!("Work dir: {:?}", &directories.work_dir);
     tracing::info!("Build script: {:?}", build_script);
 
-    let files_before = record_files(&directories.host_prefix).expect("Could not record files");
+    let files_before = record_files(&directories.build_prefix).expect("Could not record files");
 
     let (interpreter, args) = if cfg!(unix) {
         ("/bin/bash", vec![build_script.as_os_str().to_owned()])
@@ -208,7 +208,7 @@ pub async fn run_build(
         ],
     )?;
 
-    let files_after = record_files(&directories.host_prefix).expect("Could not record files");
+    let files_after = record_files(&directories.build_prefix).expect("Could not record files");
 
     let difference = files_after
         .difference(&files_before)
@@ -218,7 +218,7 @@ pub async fn run_build(
     let result = package_conda(
         &output,
         &difference,
-        &directories.host_prefix,
+        &directories.build_prefix,
         &directories.output_dir,
     )?;
 
