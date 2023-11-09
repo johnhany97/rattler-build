@@ -29,6 +29,7 @@ fn get_sitepackages_dir(prefix: &Path, platform: &Platform, py_ver: &str) -> Pat
 /// Returns a map of environment variables for Python that are used in the build process.
 ///
 /// Variables:
+/// - PYTHON: path to Python executable
 /// - PY3K: 1 if Python 3, 0 if Python 2
 /// - PY_VER: Python version (major.minor), e.g. 3.8
 /// - STDLIB_DIR: Python standard library directory
@@ -41,6 +42,14 @@ pub fn python_vars(
     variant: &BTreeMap<String, String>,
 ) -> HashMap<String, String> {
     let mut result = HashMap::<String, String>::new();
+
+    if platform.is_windows() {
+        let python = prefix.join("python.exe");
+        result.insert("PYTHON".to_string(), python.to_string_lossy().to_string());
+    } else {
+        let python = prefix.join("bin/python");
+        result.insert("PYTHON".to_string(), python.to_string_lossy().to_string());
+    }
 
     if let Some(py_ver) = variant.get("python") {
         let py_ver = py_ver.split('.').collect::<Vec<_>>();
@@ -116,8 +125,8 @@ pub fn language_vars(
 ) -> HashMap<String, String> {
     let mut result = HashMap::<String, String>::new();
 
-    result.extend(python_vars(prefix, platform, variant).into_iter());
-    result.extend(r_vars(prefix, platform, variant).into_iter());
+    result.extend(python_vars(prefix, platform, variant));
+    result.extend(r_vars(prefix, platform, variant));
 
     result
 }
@@ -162,15 +171,15 @@ pub fn os_vars(prefix: &Path, platform: &Platform) -> HashMap<String, String> {
     vars.insert("PATH".to_string(), env::var("PATH").unwrap_or_default());
 
     if cfg!(target_family = "windows") {
-        vars.extend(windows::env::default_env_vars(prefix, platform).into_iter());
+        vars.extend(windows::env::default_env_vars(prefix, platform));
     } else if cfg!(target_family = "unix") {
-        vars.extend(unix::env::default_env_vars(prefix).into_iter());
+        vars.extend(unix::env::default_env_vars(prefix));
     }
 
     if platform.is_osx() {
-        vars.extend(macos::env::default_env_vars(prefix, platform).into_iter());
+        vars.extend(macos::env::default_env_vars(prefix, platform));
     } else if platform.is_linux() {
-        vars.extend(linux::env::default_env_vars(prefix).into_iter());
+        vars.extend(linux::env::default_env_vars(prefix));
     }
 
     vars
@@ -231,8 +240,11 @@ pub fn vars(output: &Output, build_state: &str) -> HashMap<String, String> {
     // disabled as this results in .egg-info rather than
     // .dist-info directories being created, see gh-3094
     // set PIP_CACHE_DIR to a path in the work dir that does not exist.
-    let pip_cache = directories.work_dir.parent().unwrap().join("pip_cache");
-    insert!(vars, "PIP_CACHE_DIR", pip_cache.to_string_lossy());
+    if let Some(work_dir_parent) = directories.work_dir.parent() {
+        let pip_cache = work_dir_parent.join("pip_cache");
+        insert!(vars, "PIP_CACHE_DIR", pip_cache.to_string_lossy());
+    }
+
     // tell pip to not get anything from PyPI, please. We have everything we need
     // locally, and if we don't, it's a problem.
     insert!(vars, "PIP_NO_INDEX", "True");
@@ -243,15 +255,24 @@ pub fn vars(output: &Output, build_state: &str) -> HashMap<String, String> {
     }
 
     // pkg vars
-    insert!(vars, "PKG_NAME", output.name());
+    insert!(vars, "PKG_NAME", output.name().as_normalized());
     insert!(vars, "PKG_VERSION", output.version());
-    insert!(vars, "PKG_BUILDNUM", output.recipe.build.number.to_string());
+    insert!(
+        vars,
+        "PKG_BUILDNUM",
+        output.recipe.build().number().to_string()
+    );
 
     // TODO this is inaccurate
     insert!(
         vars,
         "PKG_BUILD_STRING",
-        output.recipe.build.string.clone().unwrap_or_default()
+        output
+            .recipe
+            .build()
+            .string()
+            .unwrap_or_default()
+            .to_owned()
     );
     insert!(vars, "PKG_HASH", output.build_configuration.hash.clone());
     if output.build_configuration.cross_compilation() {
@@ -278,9 +299,18 @@ pub fn vars(output: &Output, build_state: &str) -> HashMap<String, String> {
 
     vars.extend(language_vars(
         &directories.host_prefix,
-        &output.build_configuration.target_platform,
+        // Note: host_platform cannot be noarch
+        &output.build_configuration.host_platform,
         &output.build_configuration.variant,
     ));
+
+    // for reproducibility purposes, set the SOURCE_DATE_EPOCH to the configured timestamp
+    // this value will be taken from the previous package for rebuild purposes
+    let timestamp_epoch_secs = output.build_configuration.timestamp.timestamp();
+    vars.insert(
+        "SOURCE_DATE_EPOCH".to_string(),
+        timestamp_epoch_secs.to_string(),
+    );
 
     // let vars: Vec<(String, String)> = vec![
     //     // build configuration
@@ -326,7 +356,7 @@ pub fn write_env_script<T: Shell + Clone>(
         shell_type.set_env_var(&mut s, &k, &v)?;
     }
 
-    for env_key in &output.recipe.build.script_env.passthrough {
+    for env_key in output.recipe.build().script_env().passthrough() {
         let var = std::env::var(env_key);
         if let Ok(var) = var {
             shell_type.set_env_var(&mut s, env_key, var.as_str())?;
@@ -338,11 +368,11 @@ pub fn write_env_script<T: Shell + Clone>(
         }
     }
 
-    for (k, v) in &output.recipe.build.script_env.env {
+    for (k, v) in output.recipe.build().script_env().env() {
         shell_type.set_env_var(&mut s, k, v)?;
     }
 
-    if !output.recipe.build.script_env.secrets.is_empty() {
+    if !output.recipe.build().script_env().secrets().is_empty() {
         tracing::error!("Secrets are not supported yet");
     }
 

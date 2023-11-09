@@ -4,9 +4,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::recipe::parser::{Checksum, UrlSource};
 use rattler_digest::compute_file_digest;
-
-use crate::metadata::{Checksum, UrlSrc};
 
 use super::SourceError;
 
@@ -16,11 +15,12 @@ fn validate_checksum(path: &Path, checksum: &Checksum) -> bool {
             let digest =
                 compute_file_digest::<sha2::Sha256>(path).expect("Could not compute SHA256");
             let computed_sha = hex::encode(digest);
-            if !computed_sha.eq(value) {
+            let checksum_sha = hex::encode(value);
+            if !computed_sha.eq(&checksum_sha) {
                 tracing::error!(
                     "SHA256 values of downloaded file not matching!\nDownloaded = {}, should be {}",
                     computed_sha,
-                    value
+                    checksum_sha
                 );
                 false
             } else {
@@ -64,18 +64,37 @@ fn cache_name_from_url(url: &url::Url, checksum: &Checksum) -> String {
     let filename = url.path_segments().unwrap().last().unwrap();
     let (stem, extension) = split_filename(filename);
     let checksum = match checksum {
-        Checksum::Sha256(value) => value,
-        Checksum::Md5(value) => value,
+        Checksum::Sha256(value) => hex::encode(value),
+        Checksum::Md5(value) => hex::encode(value),
     };
     format!("{}_{}{}", stem, &checksum[0..8], extension)
 }
 
 pub(crate) async fn url_src(
-    source: &UrlSrc,
+    source: &UrlSource,
     cache_dir: &Path,
     checksum: &Checksum,
 ) -> Result<PathBuf, SourceError> {
-    let cache_name = PathBuf::from(cache_name_from_url(&source.url, checksum));
+    if source.url().scheme() == "file" {
+        let local_path = source.url().to_file_path().map_err(|_| {
+            SourceError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Invalid local file path",
+            ))
+        })?;
+        if !local_path.is_file() {
+            return Err(SourceError::FileNotFound);
+        }
+        if validate_checksum(&local_path, checksum) {
+            tracing::info!("Using local source file.");
+            return Ok(local_path);
+        } else {
+            tracing::error!("Checksum validation failed!");
+            return Err(SourceError::ValidationFailed);
+        }
+    }
+
+    let cache_name = PathBuf::from(cache_name_from_url(source.url(), checksum));
     let cache_name = cache_dir.join(cache_name);
 
     let metadata = fs::metadata(&cache_name);
@@ -84,7 +103,7 @@ pub(crate) async fn url_src(
         return Ok(cache_name.clone());
     }
 
-    let response = reqwest::get(source.url.clone()).await?;
+    let response = reqwest::get(source.url().clone()).await?;
 
     let mut file = std::fs::File::create(&cache_name)?;
 
@@ -103,7 +122,8 @@ pub(crate) async fn url_src(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metadata::Checksum;
+    use crate::recipe::parser::Checksum;
+    use sha2::Sha256;
     use url::Url;
 
     #[test]
@@ -130,19 +150,20 @@ mod tests {
 
     #[test]
     fn test_cache_name() {
-        let cases = vec![
+        let cases =
+            vec![
             (
                 "https://example.com/example.tar.gz",
-                Checksum::Sha256(
-                    "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef".to_string(),
-                ),
+                Checksum::Sha256(rattler_digest::parse_digest_from_hex::<Sha256>(
+                    "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+                ).unwrap()),
                 "example_12345678.tar.gz",
             ),
             (
                 "https://github.com/mamba-org/mamba/archive/refs/tags/micromamba-12.23.12.tar.gz",
-                Checksum::Sha256(
-                    "63fd8a1dbec811e63d4f9b5e27757af45d08a219d0900c7c7a19e0b177a576b8".to_string(),
-                ),
+                Checksum::Sha256(rattler_digest::parse_digest_from_hex::<Sha256>(
+                    "63fd8a1dbec811e63d4f9b5e27757af45d08a219d0900c7c7a19e0b177a576b8",
+                ).unwrap()),
                 "micromamba-12.23.12_63fd8a1d.tar.gz",
             ),
         ];

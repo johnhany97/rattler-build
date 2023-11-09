@@ -78,12 +78,12 @@ context:
 
 # top level package information (name and version)
 package:
-  name: "{{ name }}"
-  version: "{{ version }}"
+  name: ${{ name }}
+  version: ${{ version }}
 
 # location to get the source from
 source:
-  url: https://pypi.io/packages/source/{{ name[0] }}/{{ name }}/{{ name }}-{{ version }}.tar.gz
+  url: https://pypi.io/packages/source/${{ name[0] }}/${{ name }}/${{ name }}-${{ version }}.tar.gz
   sha256: f3832918bc3c66617f92e35f5d70729187676313caa60c187eb0f28b8fe5e3b5
 
 # build number (should be incremented if a new build is made, but version is not incrementing)
@@ -171,7 +171,7 @@ The git_url can also be a relative path to the recipe directory.
 source:
   git_url: https://github.com/ilanschnell/bsdiff4.git
   git_rev: 1.1.4
-  git_depth: 1 # (Defaults to -1/not shallow) Not implemented yet, ignored in the build for now. 
+  git_depth: 1 # (Defaults to -1/not shallow) Not implemented yet, ignored in the build for now.
 ```
 
 
@@ -428,8 +428,10 @@ list `python` here and an R package would list `mro-base` or `r-base`.
 ```yaml
 requirements:
   build:
-    - "{{ compiler('c') }}"
-    - sel(linux): "{{ cdt('xorg-x11-proto-devel') }}"
+    - ${{ compiler('c') }}
+    - if: linux
+      then:
+        - ${{ cdt('xorg-x11-proto-devel') }}
   host:
     - python
 ```
@@ -447,8 +449,8 @@ priority over the build prefix. Executables that don't exist in the host prefix
 should be found in the build prefix.
 
 The build and host prefixes are always separate when both are defined, or when
-`{{ compiler() }}` Jinja2 functions are used. The only time that build and host
-are merged is when the host section is absent, and no `{{ compiler() }}` Jinja2
+`${{ compiler() }}` Jinja2 functions are used. The only time that build and host
+are merged is when the host section is absent, and no `${{ compiler() }}` Jinja2
 functions are used in meta.yaml.
 
 ### Run
@@ -462,7 +464,6 @@ specifications](https://conda.io/projects/conda/en/latest/user-guide/concepts/pk
 requirements:
   run:
     - python
-    - sel(py26): argparse
     - six >=1.8.0
 ```
 
@@ -793,8 +794,8 @@ licenses require the license statement to be distributed with the package. The
 filename is relative to the source or recipe directory. The value can be a
 single filename or a YAML list for multiple license files. Values can also point
 to directories with license information. Directory entries must end with a `/`
-suffix (this is to lessen unintentional inclusion of non-license files; all of
-the directory's contents will be unconditionally and recursively added).
+suffix (this is to lessen unintentional inclusion of non-license files; all the
+directory's contents will be unconditionally and recursively added).
 
 ```yaml
 about:
@@ -829,7 +830,7 @@ context:
   name: "test"
   version: "5.1.2"
   # later keys can reference previous keys and use jinja functions to compute new values
-  major_version: "{{ version.split('.')[0] }}"
+  major_version: ${{ version.split('.')[0] }}
 ```
 
 Later in your `recipe.yaml` you can use these values in string interpolation
@@ -837,20 +838,20 @@ with Jinja. For example:
 
 ```yaml
 source:
-  url: https://github.com/mamba-org/{{ name }}/v{{ version }}.tar.gz
+  url: https://github.com/mamba-org/${{ name }}/v${{ version }}.tar.gz
 ```
 
 Jinja has built-in support for some common string manipulations.
 
 In rattler-build, complex Jinja is completely disallowed as we try to produce
 YAML that is valid at all times. So you should not use any `{% if ... %}` or
-similar Jinja constructs that produce invalid yaml. Furthermore, quotes need to
-be applied when starting a value with double-curly brackets like so:
+similar Jinja constructs that produce invalid yaml. Furthermore, instead of plain
+double curly brackets Jinja statements need to be prefixed by `$`, e.g. `${{ ... }}`:
 
 ```yaml
 package:
   name: {{ name }}   # WRONG: invalid yaml
-  name: "{{ name }}" # correct
+  name: ${{ name }} # correct
 ```
 
 For more information, see the [Jinja2 template
@@ -910,14 +911,14 @@ package:
 build:
   run_exports:
     # this will evaluate to `mypkg <1.3`
-    - "{{ pin_subpackage(name, max_pin='x.x') }}"
+    - ${{ pin_subpackage(name, max_pin='x.x') }}
 ```
 
 #### Pin compatible
 
 **Note: not yet implemented**
 
-Pin compatible let's you pin a package based on the version retrieved from the
+Pin compatible lets you pin a package based on the version retrieved from the
 variant file (if the pinning from the variant file needs customization).
 
 E.g. if the variant specifies a pin for `numpy: 1.11`, one can use
@@ -930,7 +931,7 @@ requirements:
     - numpy
   run:
     # this will export `numpy >=1.11,<2`, instead of the stricter `1.11` pin
-    - "{{ pin_compatible('numpy', min_pin='x.x', max_pin='x') }}"
+    - ${{ pin_compatible('numpy', min_pin='x.x', max_pin='x') }}
 ```
 
 
@@ -942,12 +943,26 @@ preprocessing stage. If a selector evaluates to `true`, the item is flattened
 into the parent element. If a selector evaluates to `false`, the item is
 removed.
 
+Selectors can use `if ... then ... else` as follows:
+
+
 ```yaml
 source:
-  - sel(not win):
-      url: http://path/to/unix/source
-  - sel(win):
-      url: http://path/to/windows/source
+  - if: not win
+    then:
+      - url: http://path/to/unix/source
+    else:
+      - url: http://path/to/windows/source
+
+# or the equivalent with two if conditions:
+
+source:
+  - if: unix
+    then:
+      - url: http://path/to/unix/source
+  - if: win
+    then:
+      - url: http://path/to/windows/source
 ```
 
 A selector is a valid Python statement that is executed. The following variables
@@ -961,13 +976,10 @@ Because the selector is any valid Python expression, complicated logic is
 possible:
 
 ```yaml
-source:
-  - sel(win):
-      url: http://path/to/windows/source
-  - sel(unix and py2k):
-      url: http://path/to/python2/unix/source
-  - sel(unix and py>=35):
-      url: http://path/to/python3/unix/source
+- if: unix and not win
+  then: ...
+- if: (win or linux) and not py27
+  then: ...
 ```
 
 Lists are automatically "merged" upwards, so it is possible to group multiple
@@ -976,10 +988,12 @@ items under a single selector:
 ```yaml
 test:
   commands:
-    - sel(unix):
+    - if: unix
+      then:
       - test -d ${PREFIX}/include/xtensor
       - test -f ${PREFIX}/lib/cmake/xtensor/xtensorConfigVersion.cmake
-    - sel(win):
+    - if: win
+      then:
       - if not exist %LIBRARY_PREFIX%\include\xtensor\xarray.hpp (exit 1)
       - if not exist %LIBRARY_PREFIX%\lib\cmake\xtensor\xtensorConfigVersion.cmake (exit 1)
 

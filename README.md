@@ -35,6 +35,12 @@ works as a standalone binary.
 You can grab a prerelease version of `rattler-build` from the [Github
 Releases](https://github.com/prefix-dev/rattler-build/releases/).
 
+Alternatively, you can install `rattler-build` via Homebrew:
+
+```
+brew install pavelzw/pavelzw/rattler-build
+```
+
 #### Dependencies
 
 Currently `rattler-build` needs some dependencies on the host system which are
@@ -81,32 +87,39 @@ A simple example recipe for the `xtensor` header-only C++ library:
 ```yaml
 context:
   name: xtensor
-  version: "0.24.6"
+  version: 0.24.6
+  sha256: f87259b51aabafdd1183947747edfff4cff75d55375334f2e81cee6dc68ef655
 
 package:
-  name: "{{ name|lower }}"
-  version: "{{ version }}"
+  name: ${{ name|lower }}
+  version: ${{ version }}
 
 source:
-  url: https://github.com/xtensor-stack/xtensor/archive/{{ version }}.tar.gz
-  sha256: f87259b51aabafdd1183947747edfff4cff75d55375334f2e81cee6dc68ef655
+  url: https://github.com/xtensor-stack/xtensor/archive/${{ version }}.tar.gz
+  sha256: ${{ sha256 }}
 
 build:
   number: 0
+  # note: in the new recipe format, `skip` is a list of conditional expressions
+  #       but for the "YAML format" discussion we pretend that we still use the
+  #       `skip: bool` syntax
+  skip: ${{ true if (win and vc14) }}
   script:
-    - sel(unix): |
-        cmake ${CMAKE_ARGS} -DBUILD_TESTS=OFF -DCMAKE_INSTALL_PREFIX=$PREFIX $SRC_DIR -DCMAKE_INSTALL_LIBDIR=lib
-        make install
-    - sel(win): |
+    - if: win
+      then: |
         cmake -G "NMake Makefiles" -D BUILD_TESTS=OFF -D CMAKE_INSTALL_PREFIX=%LIBRARY_PREFIX% %SRC_DIR%
         nmake
         nmake install
+      else: |
+        cmake ${CMAKE_ARGS} -DBUILD_TESTS=OFF -DCMAKE_INSTALL_PREFIX=$PREFIX $SRC_DIR -DCMAKE_INSTALL_LIBDIR=lib
+        make install
 
 requirements:
   build:
-    - "{{ compiler('cxx') }}"
+    - ${{ compiler('cxx') }}
     - cmake
-    - sel(unix): make
+    - if: unix
+      then: make
   host:
     - xtl >=0.7,<0.8
   run:
@@ -116,14 +129,30 @@ requirements:
 
 test:
   commands:
-    - sel(unix): test -f ${PREFIX}/include/xtensor/xarray.hpp
-    - sel(win): if not exist %LIBRARY_PREFIX%\include\xtensor\xarray.hpp (exit 1)
+    - if: unix or emscripten
+      then:
+        - test -d ${PREFIX}/include/xtensor
+        - test -f ${PREFIX}/include/xtensor/xarray.hpp
+        - test -f ${PREFIX}/share/cmake/xtensor/xtensorConfig.cmake
+        - test -f ${PREFIX}/share/cmake/xtensor/xtensorConfigVersion.cmake
+    - if: win
+      then:
+        - if not exist %LIBRARY_PREFIX%\include\xtensor\xarray.hpp (exit 1)
+        - if not exist %LIBRARY_PREFIX%\share\cmake\xtensor\xtensorConfig.cmake (exit 1)
+        - if not exist %LIBRARY_PREFIX%\share\cmake\xtensor\xtensorConfigVersion.cmake (exit 1)
 
 about:
-  home: https://github.com/xtensor-stack/xtensor
+  homepage: https://github.com/xtensor-stack/xtensor
   license: BSD-3-Clause
   license_file: LICENSE
   summary: The C++ tensor algebra library
+  description: Multi dimensional arrays with broadcasting and lazy computing
+  documentation: https://xtensor.readthedocs.io
+  repository: https://github.com/xtensor-stack/xtensor
+
+extra:
+  recipe-maintainers:
+    - some-maintainer
 ```
 
 <details>
@@ -133,15 +162,15 @@ about:
 
 ```yaml
 context:
-  version: "13.3.3"
+  version: "13.4.2"
 
 package:
-  name: rich
-  version: "{{ version }}"
+  name: "rich"
+  version: ${{ version }}
 
 source:
-  - url: https://pypi.io/packages/source/r/rich/rich-{{ version }}.tar.gz
-    sha256: dc84400a9d842b3a9c5ff74addd8eb798d155f36c1c91303888e0a66850d2a15
+  - url: https://pypi.io/packages/source/r/rich/rich-${{ version }}.tar.gz
+    sha256: d653d6bccede5844304c605d5aac802c7cf9621efd700b46c7ec2b51ea914898
 
 build:
   # Thanks to `noarch: python` this package works on all platforms
@@ -153,12 +182,12 @@ requirements:
   host:
     - pip
     - poetry-core >=1.0.0
-    - python 3.11
+    - python 3.10
   run:
     # sync with normalized deps from poetry-generated setup.py
-    - markdown-it-py >=2.2.0,<3.0.0
+    - markdown-it-py >=2.2.0
     - pygments >=2.13.0,<3.0.0
-    - python 3.11
+    - python 3.10
     - typing_extensions >=4.0.0,<5.0.0
 
 test:
@@ -170,9 +199,8 @@ test:
     - pip
 
 about:
-  home: https://github.com/Textualize/rich
+  homepage: https://github.com/Textualize/rich
   license: MIT
-  license_family: MIT
   license_file: LICENSE
   summary: Render rich text, tables, progress bars, syntax highlighting, markdown and more to the terminal
   description: |
@@ -181,8 +209,8 @@ about:
     The Rich API makes it easy to add color and style to terminal output. Rich
     can also render pretty tables, progress bars, markdown, syntax highlighted
     source code, tracebacks, and more — out of the box.
-  doc_url: https://rich.readthedocs.io
-  dev_url: https://github.com/Textualize/rich
+  documentation: https://rich.readthedocs.io
+  repository: https://github.com/Textualize/rich
 ```
 </details>
 
@@ -195,10 +223,10 @@ context:
 
 package:
   name: curl
-  version: "{{ version }}"
+  version: ${{ version }}
 
 source:
-  url: http://curl.haxx.se/download/curl-{{ version }}.tar.bz2
+  url: http://curl.haxx.se/download/curl-${{ version }}.tar.bz2
   sha256: 9b6b1e96b748d04b968786b6bdf407aa5c75ab53a3d37c1c8c81cdb736555ccf
 
 build:
@@ -206,28 +234,32 @@ build:
 
 requirements:
   build:
-    - "{{ compiler('c') }}"
-    - sel(win): cmake
-    - sel(win): ninja
-    - sel(unix): make
-    - sel(unix): perl
-    - sel(unix): pkg-config
-    - sel(unix): libtool
+    - ${{ compiler('c') }}
+    - if: win
+      then:
+        - cmake
+        - ninja
+    - if: unix
+      then:
+        - make
+        - perl
+        - pkg-config
+        - libtool
   host:
-    - sel(linux): openssl
+    - if: linux
+      then:
+        - openssl
 
 about:
-  home: http://curl.haxx.se/
+  homepage: http://curl.haxx.se/
   license: MIT/X derivate (http://curl.haxx.se/docs/copyright.html)
-  license_family: MIT
   license_file: COPYING
   summary: tool and library for transferring data with URL syntax
   description: |
     Curl is an open source command line tool and library for transferring data
     with URL syntax. It is used in command lines or scripts to transfer data.
-  doc_url: https://curl.haxx.se/docs/
-  dev_url: https://github.com/curl/curl
-  doc_source_url: https://github.com/curl/curl/tree/master/docs
+  documentation: https://curl.haxx.se/docs/
+  repository: https://github.com/curl/curl
 ```
 
 For this recipe, two additional script files (`build.sh` and `build.bat`) are

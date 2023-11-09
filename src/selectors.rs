@@ -1,7 +1,6 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    str::FromStr,
-};
+use std::{collections::BTreeMap, str::FromStr};
+
+use crate::recipe::jinja::Env;
 
 use minijinja::{value::Value, Environment};
 use rattler_conda_types::{Platform, Version, VersionSpec};
@@ -11,63 +10,62 @@ use serde_yaml::Value as YamlValue;
 pub struct SelectorConfig {
     pub target_platform: Platform,
     pub build_platform: Platform,
+    pub hash: Option<String>,
     pub variant: BTreeMap<String, String>,
 }
 
 impl SelectorConfig {
-    pub fn into_context(self) -> HashMap<String, Value> {
-        let mut context = HashMap::<String, Value>::new();
+    pub fn into_context(self) -> BTreeMap<String, Value> {
+        let mut context = BTreeMap::new();
 
         context.insert(
             "target_platform".to_string(),
             Value::from_safe_string(self.target_platform.to_string()),
         );
+
+        if let Some(platform) = self.target_platform.only_platform() {
+            context.insert(
+                platform.to_string(),
+                Value::from_safe_string(platform.to_string()),
+            );
+        }
+
+        if let Some(arch) = self.target_platform.arch() {
+            context.insert(arch.to_string(), Value::from(true));
+        }
+
         context.insert(
             "unix".to_string(),
             Value::from(self.target_platform.is_unix()),
         );
-        context.insert(
-            "win".to_string(),
-            Value::from(self.target_platform.is_windows()),
-        );
-        context.insert(
-            "osx".to_string(),
-            Value::from(self.target_platform.is_osx()),
-        );
-        context.insert(
-            "linux".to_string(),
-            Value::from(self.target_platform.is_linux()),
-        );
-        let arch = self
-            .target_platform
-            .to_string()
-            .split('-')
-            .last()
-            .unwrap()
-            .to_string();
-
-        let arch = match arch.as_str() {
-            "64" => "x86_64",
-            "32" => "x86",
-            _ => &arch,
-        };
-
-        context.insert(arch.to_string(), Value::from(true));
 
         context.insert(
             "build_platform".to_string(),
             Value::from_safe_string(self.build_platform.to_string()),
         );
 
-        // for (key, v) in std::env::vars() {
-        //     context.insert(key, Value::from_safe_string(v));
-        // }
+        if let Some(hash) = self.hash {
+            context.insert("hash".to_string(), Value::from_safe_string(hash));
+        }
+
+        context.insert("env".to_string(), Value::from_object(Env));
 
         for (key, v) in self.variant {
             context.insert(key, Value::from_safe_string(v));
         }
 
         context
+    }
+}
+
+impl Default for SelectorConfig {
+    fn default() -> Self {
+        Self {
+            target_platform: Platform::current(),
+            build_platform: Platform::current(),
+            hash: None,
+            variant: Default::default(),
+        }
     }
 }
 
@@ -271,6 +269,7 @@ mod tests {
         let selector_config = SelectorConfig {
             target_platform: Platform::Linux64,
             build_platform: Platform::Linux64,
+            hash: None,
             variant: Default::default(),
         };
         assert!(eval_selector("sel(unix)", &selector_config));
@@ -297,6 +296,7 @@ mod tests {
         let selector_config = SelectorConfig {
             target_platform: Platform::Linux64,
             build_platform: Platform::Linux64,
+            hash: None,
             variant,
         };
 
@@ -337,6 +337,7 @@ mod tests {
         let selector_config = SelectorConfig {
             target_platform: Platform::Linux64,
             build_platform: Platform::Linux64,
+            hash: None,
             variant: Default::default(),
         };
 

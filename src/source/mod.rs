@@ -1,14 +1,13 @@
 use std::{
     fs,
-    path::{Path, PathBuf, StripPrefixError},
+    path::{Path, StripPrefixError},
     process::Command,
 };
 
-use fs_extra::dir::{copy, create_all, remove, CopyOptions};
-use fs_extra::error::ErrorKind::PermissionDenied;
+use crate::recipe::parser::Source;
 
-use crate::metadata::Source;
-
+pub mod copy_dir;
+#[cfg(feature = "git")]
 pub mod git_source;
 pub mod patch;
 pub mod url_source;
@@ -33,11 +32,21 @@ pub enum SourceError {
     #[error("Download could not be validated with checksum!")]
     ValidationFailed,
 
+    #[error("File not found!")]
+    FileNotFound,
+
     #[error("Failed to apply patch: {0}")]
     PatchFailed(String),
 
+    #[cfg(feature = "git")]
     #[error("Failed to run git command: {0}")]
     GitError(#[from] git2::Error),
+
+    #[error("Could not walk dir")]
+    IgnoreError(#[from] ignore::Error),
+
+    #[error("Failed to parse glob pattern")]
+    Glob(#[from] globset::Error),
 }
 
 /// Fetches all sources in a list of sources and applies specified patches
@@ -52,51 +61,76 @@ pub async fn fetch_sources(
 
     for src in sources {
         match &src {
-            Source::Git(src) => {
-                tracing::info!("Fetching source from GIT: {}", src.git_url);
-                let result = match git_source::git_src(src, &cache_src, recipe_dir) {
-                    Ok(path) => path,
-                    Err(e) => return Err(e),
-                };
-                let dest_dir = if let Some(folder) = &src.folder {
-                    work_dir.join(folder)
-                } else {
-                    work_dir.to_path_buf()
-                };
-                copy_dir(&result, &dest_dir)?;
+            Source::Git(_src) => {
+                #[cfg(feature = "git")]
+                {
+                    tracing::info!("Fetching source from GIT: {}", _src.url());
+                    let result = git_source::git_src(_src, &cache_src, recipe_dir)?;
+                    let dest_dir = if let Some(folder) = _src.folder() {
+                        work_dir.join(folder)
+                    } else {
+                        work_dir.to_path_buf()
+                    };
+                    crate::source::copy_dir::CopyDir::new(&result, &dest_dir)
+                        .use_gitignore(false)
+                        .run()?;
 
-                if let Some(patches) = &src.patches {
-                    patch::apply_patches(patches, work_dir, recipe_dir)?;
+                    if !_src.patches().is_empty() {
+                        patch::apply_patches(_src.patches(), work_dir, recipe_dir)?;
+                    }
                 }
             }
             Source::Url(src) => {
-                tracing::info!("Fetching source from URL: {}", src.url);
-                let res = url_source::url_src(src, &cache_src, &src.checksum).await?;
-                let dest_dir = if let Some(folder) = &src.folder {
+                tracing::info!("Fetching source from URL: {}", src.url());
+                let res =
+                    url_source::url_src(src, &cache_src, src.checksums().first().unwrap()).await?;
+                let mut dest_dir = if let Some(folder) = src.folder() {
                     work_dir.join(folder)
                 } else {
                     work_dir.to_path_buf()
                 };
-                extract(&res, &dest_dir)?;
-                tracing::info!("Extracted to {:?}", work_dir);
+                const KNOWN_ARCHIVE_EXTENSIONS: [&str; 5] =
+                    ["tar", "tar.gz", "tar.xz", "tar.bz2", "zip"];
+                if KNOWN_ARCHIVE_EXTENSIONS.iter().any(|ext| {
+                    res.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .ends_with(ext)
+                }) {
+                    extract(&res, &dest_dir)?;
+                    tracing::info!("Extracted to {:?}", dest_dir);
+                } else {
+                    if !dest_dir.exists() {
+                        fs::create_dir_all(&dest_dir)?;
+                    }
+                    if let Some(file_name) = src.file_name() {
+                        dest_dir = dest_dir.join(file_name);
+                    } else {
+                        dest_dir = dest_dir.join(res.file_name().unwrap());
+                    }
+                    fs::copy(&res, &dest_dir)?;
+                    tracing::info!("Downloaded to {:?}", dest_dir);
+                }
 
-                if let Some(patches) = &src.patches {
-                    patch::apply_patches(patches, work_dir, recipe_dir)?;
+                if !src.patches().is_empty() {
+                    patch::apply_patches(src.patches(), work_dir, recipe_dir)?;
                 }
             }
             Source::Path(src) => {
-                tracing::info!("Copying source from path: {:?}", src.path);
-                let src_path = recipe_dir.join(&src.path);
+                let src_path = recipe_dir.join(src.path()).canonicalize()?;
+                tracing::info!("Copying source from path: {:?}", src_path);
 
-                let dest_dir = if let Some(folder) = &src.folder {
+                let dest_dir = if let Some(folder) = src.folder() {
                     work_dir.join(folder)
                 } else {
                     work_dir.to_path_buf()
                 };
-                copy_dir(&src_path, &dest_dir)?;
+                let _ = copy_dir::CopyDir::new(&src_path, &dest_dir)
+                    .use_gitignore(true)
+                    .run()?;
 
-                if let Some(patches) = &src.patches {
-                    patch::apply_patches(patches, work_dir, recipe_dir)?;
+                if !src.patches().is_empty() {
+                    patch::apply_patches(src.patches(), work_dir, recipe_dir)?;
                 }
             }
         }
@@ -119,41 +153,4 @@ fn extract(
         .output();
 
     output
-}
-
-fn copy_dir(from: &PathBuf, to: &PathBuf) -> Result<(), SourceError> {
-    // Create the to path because we're going to copy the contents only
-    create_all(to, true).unwrap();
-
-    // Setup copy options, overwrite if needed, only copy the contents as we want to specify the dir name manually
-    let mut options = CopyOptions::new();
-    options.overwrite = true;
-    options.content_only = true;
-
-    match copy(from, to, &options) {
-        Ok(_) => tracing::info!(
-            "Copied {} to {}",
-            from.to_string_lossy(),
-            to.to_string_lossy()
-        ),
-        // Use matches as the ErrorKind does not support `==`
-        Err(e) if matches!(e.kind, PermissionDenied) => {
-            tracing::debug!("Permission error in cache, this often happens when the previous run was exited in a faulty way. Removing the cache and retrying the copy.");
-            if let Err(remove_error) = remove(to) {
-                tracing::error!("Failed to remove cache directory: {}", remove_error);
-                return Err(SourceError::FileSystemError(e));
-            } else if let Err(retry_error) = copy(from, to, &options) {
-                tracing::error!("Failed to retry the copy operation: {}", retry_error);
-                return Err(SourceError::FileSystemError(e));
-            } else {
-                tracing::debug!(
-                    "Successfully retried copying {} to {}",
-                    from.to_string_lossy(),
-                    to.to_string_lossy()
-                );
-            }
-        }
-        Err(e) => return Err(SourceError::FileSystemError(e)),
-    }
-    Ok(())
 }

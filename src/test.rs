@@ -9,7 +9,7 @@
 
 use std::{
     fs::{self, File},
-    io::Read,
+    io::{Read, Write},
     path::{Path, PathBuf},
     str::FromStr,
 };
@@ -21,9 +21,10 @@ use rattler_conda_types::{
     MatchSpec, Platform,
 };
 use rattler_networking::AuthenticatedClient;
-use rattler_shell::activation::ActivationVariables;
-use rattler_shell::{activation::Activator, shell};
-use std::io::Write;
+use rattler_shell::{
+    activation::{ActivationVariables, Activator},
+    shell,
+};
 
 use crate::{env_vars, index, render::solver::create_environment, tool_configuration};
 
@@ -48,7 +49,7 @@ enum Tests {
     Python(PathBuf),
 }
 
-fn run_in_environment(cmd: &str, environment: &Path) -> Result<(), TestError> {
+fn run_in_environment(cmd: &str, cwd: &Path, environment: &Path) -> Result<(), TestError> {
     let current_path = std::env::var("PATH")
         .ok()
         .map(|p| std::env::split_paths(&p).collect::<Vec<_>>());
@@ -85,6 +86,7 @@ fn run_in_environment(cmd: &str, environment: &Path) -> Result<(), TestError> {
 
     let mut cmd = std::process::Command::new("bash");
     cmd.arg(tmpfile_path);
+    cmd.current_dir(cwd);
 
     let status = cmd.status().unwrap();
 
@@ -96,22 +98,24 @@ fn run_in_environment(cmd: &str, environment: &Path) -> Result<(), TestError> {
 }
 
 impl Tests {
-    fn run(&self, environment: &Path) -> Result<(), TestError> {
+    fn run(&self, environment: &Path, cwd: &Path) -> Result<(), TestError> {
         match self {
             Tests::Commands(path) => {
                 let ext = path.extension().unwrap().to_str().unwrap();
                 match (Platform::current().is_windows(), ext) {
                     (true, "bat") => {
-                        tracing::info!("Testing commands:");
+                        println!("Testing commands:");
                         run_in_environment(
                             &format!("cmd /c {}", path.to_string_lossy()),
+                            cwd,
                             environment,
                         )
                     }
                     (false, "sh") => {
-                        tracing::info!("Testing commands:");
+                        println!("Testing commands:");
                         run_in_environment(
                             &format!("bash -x {}", path.to_string_lossy()),
+                            cwd,
                             environment,
                         )
                     }
@@ -120,23 +124,27 @@ impl Tests {
             }
             Tests::Python(path) => {
                 let imports = fs::read_to_string(path)?;
-                tracing::info!("Testing Python imports:\n{imports}");
-                run_in_environment(&format!("python {}", path.to_string_lossy()), environment)
+                println!("Testing Python imports:\n{imports}");
+                run_in_environment(
+                    &format!("python {}", path.to_string_lossy()),
+                    cwd,
+                    environment,
+                )
             }
         }
     }
 }
 
-async fn tests_from_folder(pkg: &Path) -> Result<Vec<Tests>, TestError> {
+async fn tests_from_folder(pkg: &Path) -> Result<(PathBuf, Vec<Tests>), TestError> {
     let mut tests = Vec::new();
 
     let test_folder = pkg.join("info").join("test");
 
     if !test_folder.exists() {
-        return Ok(tests);
+        return Ok((test_folder, tests));
     }
 
-    let mut read_dir = tokio::fs::read_dir(test_folder).await?;
+    let mut read_dir = tokio::fs::read_dir(&test_folder).await?;
 
     while let Some(entry) = read_dir.next_entry().await? {
         let path = entry.path();
@@ -151,11 +159,11 @@ async fn tests_from_folder(pkg: &Path) -> Result<Vec<Tests>, TestError> {
         }
     }
 
-    Ok(tests)
+    Ok((test_folder, tests))
 }
 
 fn file_from_tar_bz2(archive_path: &Path, find_path: &Path) -> Result<String, std::io::Error> {
-    let reader = std::fs::File::open(archive_path).unwrap();
+    let reader = std::fs::File::open(archive_path)?;
     let mut archive = rattler_package_streaming::read::stream_tar_bz2(reader);
 
     for entry in archive.entries()? {
@@ -174,7 +182,7 @@ fn file_from_tar_bz2(archive_path: &Path, find_path: &Path) -> Result<String, st
 }
 
 fn file_from_conda(archive_path: &Path, find_path: &Path) -> Result<String, std::io::Error> {
-    let reader = std::fs::File::open(archive_path).unwrap();
+    let reader = std::fs::File::open(archive_path)?;
 
     let mut archive = if find_path.starts_with("info") {
         rattler_package_streaming::seek::stream_conda_info(reader)
@@ -271,6 +279,16 @@ pub async fn run_test(package_file: &Path, config: &TestConfiguration) -> Result
     let cache_dir = rattler::default_cache_dir().unwrap();
 
     let pkg = ArchiveIdentifier::try_from_path(package_file).ok_or(TestError::TestFailed)?;
+
+    // if the package is already in the cache, remove it. TODO make this based on SHA256 instead!
+    let cache_key = CacheKey::from(pkg.clone());
+    let package_folder = cache_dir.join("pkgs").join(cache_key.to_string());
+
+    if package_folder.exists() {
+        println!("Removing previously cached package {:?}", package_folder);
+        fs::remove_dir_all(package_folder)?;
+    }
+
     let match_spec =
         MatchSpec::from_str(format!("{}={}={}", pkg.name, pkg.version, pkg.build_string).as_str())
             .map_err(|e| TestError::MatchSpecParse(e.to_string()))?;
@@ -281,7 +299,10 @@ pub async fn run_test(package_file: &Path, config: &TestConfiguration) -> Result
     let global_configuration = tool_configuration::Configuration {
         client: AuthenticatedClient::default(),
         multi_progress_indicator: MultiProgress::new(),
+        no_clean: config.keep_test_prefix,
     };
+
+    println!("Creating test environment in {:?}", prefix);
 
     create_environment(
         &dependencies,
@@ -296,14 +317,14 @@ pub async fn run_test(package_file: &Path, config: &TestConfiguration) -> Result
     let cache_key = CacheKey::from(pkg);
     let dir = cache_dir.join("pkgs").join(cache_key.to_string());
 
-    println!("Collecting tests from {:?}", dir);
-    let tests = tests_from_folder(&dir).await?;
+    tracing::info!("Collecting tests from {:?}", dir);
+    let (test_folder, tests) = tests_from_folder(&dir).await?;
 
     for test in tests {
-        test.run(&prefix)?;
+        test.run(&prefix, &test_folder)?;
     }
 
-    println!(
+    tracing::info!(
         "{} all tests passed!",
         console::style(console::Emoji("✔", "")).green()
     );

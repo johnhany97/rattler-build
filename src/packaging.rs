@@ -9,17 +9,20 @@ use std::os::unix::prelude::OsStrExt;
 #[cfg(target_family = "unix")]
 use std::os::unix::fs::symlink;
 
-use tempdir::TempDir;
+use itertools::Itertools;
+use tempfile::TempDir;
 use walkdir::WalkDir;
 
 use rattler_conda_types::package::{
-    AboutJson, FileMode, LinkJson, NoArchLinks, PathType, PathsEntry, PrefixPlaceholder,
-    PythonEntryPoints,
+    AboutJson, ArchiveType, FileMode, LinkJson, NoArchLinks, PathType, PathsEntry,
+    PrefixPlaceholder, PythonEntryPoints,
 };
 use rattler_conda_types::package::{IndexJson, PathsJson};
 use rattler_conda_types::{NoArchType, Platform};
 use rattler_digest::compute_file_digest;
-use rattler_package_streaming::write::{write_tar_bz2_package, CompressionLevel};
+use rattler_package_streaming::write::{
+    write_conda_package, write_tar_bz2_package, CompressionLevel,
+};
 
 use crate::macos;
 use crate::metadata::Output;
@@ -51,11 +54,11 @@ pub enum PackagingError {
     #[error("Failed to relink MachO file: {0}")]
     MacOSRelinkError(#[from] macos::link::RelinkError),
 
-    #[error("License file not found: {0}")]
-    LicenseFileNotFound(String),
-
     #[error("Relink error: {0}")]
     RelinkError(#[from] crate::post::RelinkError),
+
+    #[error(transparent)]
+    SourceError(#[from] crate::source::SourceError),
 }
 
 #[allow(unused_variables)]
@@ -164,7 +167,6 @@ fn create_paths_json(
 
         let relative_path = p.strip_prefix(path_prefix)?.to_path_buf();
 
-        tracing::info!("Adding {:?}", &relative_path);
         if !p.exists() {
             if p.is_symlink() {
                 tracing::warn!(
@@ -245,15 +247,15 @@ fn create_index_json(output: &Output) -> Result<String, PackagingError> {
     };
 
     let index_json = IndexJson {
-        name: output.name().to_string(),
+        name: output.name().clone(),
         version: output.version().parse()?,
         build: output.build_string().to_string(),
-        build_number: recipe.build.number,
+        build_number: recipe.build().number(),
         arch,
         platform,
         subdir: Some(output.build_configuration.target_platform.to_string()),
-        license: recipe.about.license.clone(),
-        license_family: recipe.about.license_family.clone(),
+        license: recipe.about().license().map(|l| l.to_string()),
+        license_family: recipe.about().license_family().map(|l| l.to_owned()),
         timestamp: Some(output.build_configuration.timestamp),
         depends: output
             .finalized_dependencies
@@ -273,7 +275,7 @@ fn create_index_json(output: &Output) -> Result<String, PackagingError> {
             .iter()
             .map(|d| d.spec().to_string())
             .collect(),
-        noarch: recipe.build.noarch,
+        noarch: *recipe.build().noarch(),
         track_features: vec![],
         features: None,
     };
@@ -284,14 +286,30 @@ fn create_index_json(output: &Output) -> Result<String, PackagingError> {
 /// Create the about.json file for the given output.
 fn create_about_json(output: &Output) -> Result<String, PackagingError> {
     let recipe = &output.recipe;
+    // FIXME: Updated recipe specs don't allow for vectors in any of the About fields except license_files
     let about_json = AboutJson {
-        home: recipe.about.home.clone().unwrap_or_default(),
-        license: recipe.about.license.clone(),
-        license_family: recipe.about.license_family.clone(),
-        summary: recipe.about.summary.clone(),
-        description: recipe.about.description.clone(),
-        doc_url: recipe.about.doc_url.clone().unwrap_or_default(),
-        dev_url: recipe.about.dev_url.clone().unwrap_or_default(),
+        home: recipe
+            .about()
+            .homepage()
+            .cloned()
+            .map(|s| vec![s])
+            .unwrap_or_default(),
+        license: recipe.about().license().map(|s| s.to_string()),
+        license_family: recipe.about().license_family().map(|s| s.to_owned()),
+        summary: recipe.about().summary().map(|s| s.to_owned()),
+        description: recipe.about().description().map(|s| s.to_owned()),
+        doc_url: recipe
+            .about()
+            .documentation()
+            .cloned()
+            .map(|url| vec![url])
+            .unwrap_or_default(),
+        dev_url: recipe
+            .about()
+            .repository()
+            .cloned()
+            .map(|url| vec![url])
+            .unwrap_or_default(),
         // TODO ?
         source_url: None,
         channels: output.build_configuration.channels.clone(),
@@ -344,9 +362,29 @@ fn write_to_dest(
     let path_rel = path.strip_prefix(prefix)?;
     let mut dest_path = dest_folder.join(path_rel);
 
+    // skip the share/info/dir file because multiple packages would write
+    // to the same index file
+    if path_rel == Path::new("share/info/dir") {
+        return Ok(None);
+    }
+
+    let ext = path.extension().unwrap_or_default();
+    // pyo considered harmful: https://www.python.org/dev/peps/pep-0488/
+    if ext == "pyo" {
+        return Ok(None); // skip .pyo files
+    }
+
+    if ext == "py" || ext == "pyc" {
+        // if we have a .so file of the same name, skip this path
+        let so_path = path.with_extension("so");
+        let pyd_path = path.with_extension("pyd");
+        if so_path.exists() || pyd_path.exists() {
+            return Ok(None);
+        }
+    }
+
     if noarch_type.is_python() {
-        let ext = path.extension().unwrap_or_default();
-        if ext == "pyc" || ext == "pyo" {
+        if ext == "pyc" {
             return Ok(None); // skip .pyc files
         }
 
@@ -357,7 +395,7 @@ fn write_to_dest(
         {
             return Ok(None);
         }
-        println!("path_rel: {:?}", path_rel);
+
         if path_rel
             .components()
             .any(|c| c == Component::Normal("site-packages".as_ref()))
@@ -492,7 +530,7 @@ fn write_to_dest(
 /// This function creates a link.json file for the given output.
 fn create_link_json(output: &Output) -> Result<Option<String>, PackagingError> {
     let noarch_links = PythonEntryPoints {
-        entry_points: output.recipe.build.entry_points.clone(),
+        entry_points: output.recipe.build().entry_points().to_owned(),
     };
 
     let link_json = LinkJson {
@@ -508,40 +546,62 @@ fn copy_license_files(
     output: &Output,
     tmp_dir_path: &Path,
 ) -> Result<Option<Vec<PathBuf>>, PackagingError> {
-    if let Some(license_files) = &output.recipe.about.license_file {
+    if output.recipe.about().license_files().is_empty() {
+        Ok(None)
+    } else {
+        let license_globs = output.recipe.about().license_files();
+
         let licenses_folder = tmp_dir_path.join("info/licenses/");
         fs::create_dir_all(&licenses_folder)?;
-        let mut copied_files = Vec::new();
-        for license in license_files {
-            // license file can be found either in the recipe folder or in the source folder
-            let candidates = vec![
-                output
-                    .build_configuration
-                    .directories
-                    .recipe_dir
-                    .join(license),
-                output
-                    .build_configuration
-                    .directories
-                    .work_dir
-                    .join(license),
-            ];
 
-            let found = candidates.iter().find(|c| c.exists());
-            if let Some(license_file) = found {
-                if license_file.is_dir() {
-                    todo!("License file is a directory");
-                }
-                let dest = licenses_folder.join(license);
-                fs::copy(license_file, &dest)?;
-                copied_files.push(dest);
-            } else {
-                return Err(PackagingError::LicenseFileNotFound(license.clone()));
+        for license_glob in license_globs
+            .iter()
+            // Only license globs that do not end with '/' or '*'
+            .filter(|license_glob| !license_glob.ends_with('/') && !license_glob.ends_with('*'))
+        {
+            let filepath = licenses_folder.join(license_glob);
+            if !filepath.exists() {
+                tracing::warn!(path = %filepath.display(), "File does not exist");
             }
         }
+
+        let copy_dir = crate::source::copy_dir::CopyDir::new(
+            &output.build_configuration.directories.recipe_dir,
+            &licenses_folder,
+        )
+        .with_parse_globs(license_globs.iter().map(AsRef::as_ref))
+        .use_gitignore(false)
+        .run()?;
+
+        let copied_files_recipe_dir = copy_dir.copied_pathes();
+        let any_include_matched_recipe_dir = copy_dir.any_include_glob_matched();
+
+        let copy_dir = crate::source::copy_dir::CopyDir::new(
+            &output.build_configuration.directories.work_dir,
+            &licenses_folder,
+        )
+        .with_parse_globs(license_globs.iter().map(AsRef::as_ref))
+        .use_gitignore(false)
+        .run()?;
+
+        let copied_files_work_dir = copy_dir.copied_pathes();
+        let any_include_matched_work_dir = copy_dir.any_include_glob_matched();
+
+        let copied_files = copied_files_recipe_dir
+            .iter()
+            .chain(copied_files_work_dir)
+            .map(PathBuf::from)
+            .collect::<Vec<PathBuf>>();
+
+        if !any_include_matched_work_dir && !any_include_matched_recipe_dir {
+            tracing::warn!("No include glob matched for copying license files");
+        }
+
+        if copied_files.is_empty() {
+            tracing::warn!("No license files were copied");
+        }
+
         Ok(Some(copied_files))
-    } else {
-        Ok(None)
     }
 }
 
@@ -578,45 +638,120 @@ fn filter_pyc(path: &Path, new_files: &HashSet<PathBuf>) -> bool {
 
 fn write_test_files(output: &Output, tmp_dir_path: &Path) -> Result<Vec<PathBuf>, PackagingError> {
     let mut test_files = Vec::new();
-    if let Some(test) = &output.recipe.test {
+    let test = output.recipe.test();
+    if !test.is_empty() {
         let test_folder = tmp_dir_path.join("info/test/");
         fs::create_dir_all(&test_folder)?;
 
-        if let Some(import_test) = &test.imports {
+        if !test.imports().is_empty() {
             let test_file = test_folder.join("run_test.py");
             let mut file = File::create(&test_file)?;
-            for el in import_test {
+            for el in test.imports() {
                 writeln!(file, "import {}\n", el)?;
             }
             test_files.push(test_file);
         }
 
-        if let Some(commands) = &test.commands {
+        if !test.commands().is_empty() {
             let test_file = test_folder.join("run_test.sh");
             let mut file = File::create(&test_file)?;
-            for el in commands {
+            for el in test.commands() {
                 writeln!(file, "{}\n", el)?;
             }
             test_files.push(test_file);
         }
 
-        if let Some(test_dependencies) = &test.requires {
+        if !test.requires().is_empty() {
+            let test_dependencies = test.requires();
             let test_file = test_folder.join("test_time_dependencies.json");
             let mut file = File::create(&test_file)?;
             file.write_all(serde_json::to_string(test_dependencies)?.as_bytes())?;
             test_files.push(test_file);
         }
 
-        if let Some(_test_files) = &test.files {
-            todo!("Test files is not yet implemented!");
+        if !test.files().is_empty() {
+            let globs = test.files();
+            let include_globs = globs
+                .iter()
+                .filter(|glob| !glob.trim_start().starts_with('~'))
+                .map(AsRef::as_ref)
+                .collect::<Vec<&str>>();
+
+            let exclude_globs = globs
+                .iter()
+                .filter(|glob| glob.trim_start().starts_with('~'))
+                .map(AsRef::as_ref)
+                .collect::<Vec<&str>>();
+
+            let copy_dir = crate::source::copy_dir::CopyDir::new(
+                &output.build_configuration.directories.recipe_dir,
+                &test_folder,
+            )
+            .with_include_globs(include_globs)
+            .with_exclude_globs(exclude_globs)
+            .use_gitignore(true)
+            .run()?;
+
+            test_files.extend(copy_dir.copied_pathes().iter().cloned());
         }
 
-        if let Some(_test_source_files) = &test.source_files {
-            todo!("Test files is not yet implemented!");
+        if !test.source_files().is_empty() {
+            let globs = test.source_files();
+            let include_globs = globs
+                .iter()
+                .filter(|glob| !glob.trim_start().starts_with('~'))
+                .map(AsRef::as_ref)
+                .collect::<Vec<&str>>();
+
+            let exclude_globs = globs
+                .iter()
+                .filter(|glob| glob.trim_start().starts_with('~'))
+                .map(AsRef::as_ref)
+                .collect::<Vec<&str>>();
+
+            let copy_dir = crate::source::copy_dir::CopyDir::new(
+                &output.build_configuration.directories.work_dir,
+                &test_folder,
+            )
+            .with_include_globs(include_globs)
+            .with_exclude_globs(exclude_globs)
+            .use_gitignore(true)
+            .run()?;
+
+            test_files.extend(copy_dir.copied_pathes().iter().cloned());
         }
     }
 
     Ok(test_files)
+}
+
+fn write_recipe_folder(
+    output: &Output,
+    tmp_dir_path: &Path,
+) -> Result<Vec<PathBuf>, PackagingError> {
+    let recipe_folder = tmp_dir_path.join("info/recipe/");
+    let recipe_dir = &output.build_configuration.directories.recipe_dir;
+
+    let copy_result = crate::source::copy_dir::CopyDir::new(recipe_dir, &recipe_folder).run()?;
+
+    let mut files = Vec::from(copy_result.copied_pathes());
+    // write the variant config to the appropriate file
+    let variant_config_file = recipe_folder.join("variant_config.yaml");
+    let mut variant_config = File::create(&variant_config_file)?;
+    variant_config.write_all(
+        serde_yaml::to_string(&output.build_configuration.variant)
+            .unwrap()
+            .as_bytes(),
+    )?;
+    files.push(variant_config_file);
+
+    // TODO(recipe): define how we want to render it exactly!
+    let rendered_recipe_file = recipe_folder.join("rendered_recipe.yaml");
+    let mut rendered_recipe = File::create(&rendered_recipe_file)?;
+    rendered_recipe.write_all(serde_yaml::to_string(&output).unwrap().as_bytes())?;
+    files.push(rendered_recipe_file);
+
+    Ok(files)
 }
 
 /// Given an output and a set of new files, create a conda package.
@@ -630,12 +765,13 @@ pub fn package_conda(
     new_files: &HashSet<PathBuf>,
     prefix: &Path,
     local_channel_dir: &Path,
+    package_format: ArchiveType,
 ) -> Result<PathBuf, PackagingError> {
     if output.finalized_dependencies.is_none() {
         return Err(PackagingError::DependenciesNotFinalized);
     }
 
-    let tmp_dir = TempDir::new(output.name())?;
+    let tmp_dir = TempDir::with_prefix(output.name().as_normalized())?;
     let tmp_dir_path = tmp_dir.path();
 
     let mut tmp_files = HashSet::new();
@@ -645,14 +781,14 @@ pub fn package_conda(
             continue;
         }
 
-        if output.recipe.build.noarch.is_python() {
+        if output.recipe.build().noarch().is_python() {
             // we need to remove files in bin/ that are registered as entry points
             if f.starts_with("bin") {
                 if let Some(name) = f.file_name() {
                     if output
                         .recipe
-                        .build
-                        .entry_points
+                        .build()
+                        .entry_points()
                         .iter()
                         .any(|ep| ep.command == name.to_string_lossy())
                     {
@@ -663,7 +799,7 @@ pub fn package_conda(
             // Windows
             else if f.starts_with("Scripts") {
                 if let Some(name) = f.file_name() {
-                    if output.recipe.build.entry_points.iter().any(|ep| {
+                    if output.recipe.build().entry_points().iter().any(|ep| {
                         format!("{}.exe", ep.command) == name.to_string_lossy()
                             || format!("{}-script.py", ep.command) == name.to_string_lossy()
                     }) {
@@ -678,7 +814,7 @@ pub fn package_conda(
             prefix,
             tmp_dir_path,
             &output.build_configuration.target_platform,
-            &output.recipe.build.noarch,
+            output.recipe.build().noarch(),
         )? {
             tmp_files.insert(dest_file);
         }
@@ -694,6 +830,8 @@ pub fn package_conda(
             &output.build_configuration.target_platform,
         )?;
     }
+
+    post::python(output.name(), output.version(), &tmp_files)?;
 
     tracing::info!("Relink done!");
 
@@ -727,11 +865,13 @@ pub fn package_conda(
         .write_all(serde_json::to_string_pretty(&output.build_configuration.variant)?.as_bytes())?;
 
     // TODO write recipe to info/recipe/ folder
+    let recipe_files = write_recipe_folder(output, tmp_dir_path)?;
+    tmp_files.extend(recipe_files);
 
     let test_files = write_test_files(output, tmp_dir_path)?;
     tmp_files.extend(test_files);
 
-    if output.recipe.build.noarch.is_python() {
+    if output.recipe.build().noarch().is_python() {
         if let Some(link) = create_link_json(output)? {
             let mut link_json = File::create(info_folder.join("link.json"))?;
             link_json.write_all(link.as_bytes())?;
@@ -739,30 +879,46 @@ pub fn package_conda(
         }
     }
 
+    // print sorted files
+    tracing::info!("\nFiles in package:\n");
+    tmp_files
+        .iter()
+        .map(|x| x.strip_prefix(tmp_dir_path).unwrap())
+        .sorted()
+        .for_each(|f| tracing::info!("  - {}", f.to_string_lossy()));
+
     let output_folder =
         local_channel_dir.join(output.build_configuration.target_platform.to_string());
     tracing::info!("Creating target folder {:?}", output_folder);
 
-    // make dirs
     fs::create_dir_all(&output_folder)?;
 
-    // TODO get proper hash
-    let file = format!(
-        "{}-{}-{}.tar.bz2",
-        output.name(),
-        output.version(),
-        output.build_string()
-    );
-
-    let out_path = output_folder.join(file);
+    let identifier = output.identifier();
+    let out_path = output_folder.join(format!("{}{}", identifier, package_format.extension()));
     let file = File::create(&out_path)?;
-    write_tar_bz2_package(
-        file,
-        tmp_dir_path,
-        &tmp_files.into_iter().collect::<Vec<_>>(),
-        CompressionLevel::Default,
-        Some(&output.build_configuration.timestamp),
-    )?;
+
+    match package_format {
+        ArchiveType::TarBz2 => {
+            write_tar_bz2_package(
+                file,
+                tmp_dir_path,
+                &tmp_files.into_iter().collect::<Vec<_>>(),
+                CompressionLevel::Default,
+                Some(&output.build_configuration.timestamp),
+            )?;
+        }
+        ArchiveType::Conda => {
+            // This is safe because we're just putting it together before
+            write_conda_package(
+                file,
+                tmp_dir_path,
+                &tmp_files.into_iter().collect::<Vec<_>>(),
+                CompressionLevel::Default,
+                &identifier,
+                Some(&output.build_configuration.timestamp),
+            )?;
+        }
+    }
 
     Ok(out_path)
 }

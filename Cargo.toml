@@ -1,6 +1,11 @@
+[workspace]
+members = [
+    "rust-tests"
+]
+
 [package]
 name = "rattler-build"
-version = "0.3.1"
+version = "0.4.0"
 authors = ["Wolf Vollprecht <w.vollprecht@gmail.com>"]
 homepage = "https://github.com/prefix-dev/rattler-build"
 edition = "2021"
@@ -11,64 +16,76 @@ readme = "README.md"
 default = ['native-tls']
 native-tls = ['reqwest/native-tls', 'rattler/native-tls']
 rustls-tls = ['reqwest/rustls-tls', 'rattler/rustls-tls']
+git = ['dep:git2']
 
 [dependencies]
-serde = { version = "1.0.171", features = ["derive"] }
-serde_yaml = "0.9.24"
-rattler_conda_types = { git = "https://github.com/mamba-org/rattler", branch = "main", default-features = false }
-rattler_package_streaming = { git = "https://github.com/mamba-org/rattler", branch = "main" }
-rattler_digest = { git = "https://github.com/mamba-org/rattler", branch = "main" }
-rattler_repodata_gateway = { git = "https://github.com/mamba-org/rattler", branch = "main", features = ["sparse"] }
-rattler = { git = "https://github.com/mamba-org/rattler", branch = "main", default-features = false }
-rattler_solve = { git = "https://github.com/mamba-org/rattler", branch = "main" }
-rattler_shell = { git = "https://github.com/mamba-org/rattler", branch = "main" }
-rattler_virtual_packages = { git = "https://github.com/mamba-org/rattler", branch = "main" }
-rattler_networking = { git = "https://github.com/mamba-org/rattler", branch = "main" }
-# local deps
-# rattler_conda_types = { path = "../rattler/crates/rattler_conda_types" }
-# rattler_package_streaming = { path = "../rattler/crates/rattler_package_streaming" }
-# rattler_digest = { path = "../rattler/crates/rattler_digest" }
-# rattler_repodata_gateway = { path = "../rattler/crates/rattler_repodata_gateway", features = ["sparse"] }
-# rattler = { path = "../rattler/crates/rattler" }
-# rattler_solve = { path = "../rattler/crates/rattler_solve" }
-# rattler_shell = { path = "../rattler/crates/rattler_shell" }
-# rattler_virtual_packages = { path = "../rattler/crates/rattler_virtual_packages" }
-# rattler_networking = { path = "../rattler/crates/rattler_networking" }
-anyhow = "1.0.72"
-walkdir = "2.3.3"
-sha2 = "0.10.7"
+serde = { version = "1.0.190", features = ["derive"] }
+serde_yaml = "0.9.27"
+rattler = { version = "0.11.0", default-features = false }
+rattler_conda_types = { version = "0.11.0", default-features = false }
+rattler_digest = { version = "0.11.0", default-features = false }
+rattler_networking = { version = "0.11.0", default-features = false }
+rattler_repodata_gateway = { version = "0.11.0", default-features = false, features = [
+    "sparse",
+] }
+rattler_shell = { version = "0.11.0", default-features = false, features = [
+    "sysinfo",
+] }
+rattler_solve = { version = "0.11.0", default-features = false, features = [
+    "resolvo",
+] }
+rattler_virtual_packages = { version = "0.11.0", default-features = false }
+rattler_package_streaming = { version = "0.11.0", default-features = false }
+anyhow = "1.0.75"
+walkdir = "2.4.0"
+sha2 = "0.10.8"
 hex = "0.4.3"
-serde_json = "1.0.103"
-tempdir = "0.3.7"
-reqwest = "0.11.18"
-tokio = {version = "1.29.1", features = ["rt", "macros", "rt-multi-thread"] }
+serde_json = "1.0.108"
+reqwest = "0.11.22"
+tokio = { version = "1.33.0", features = ["rt", "macros", "rt-multi-thread"] }
 itertools = "0.11.0"
 content_inspector = "0.2.4"
-serde_with = "3.1.0"
-url = "2.4.0"
-tracing = "0.1.37"
-clap = { version = "4.3.16", features = ["derive", "env", "cargo"] }
-minijinja = { version = "1.0.5", features = ["unstable_machinery"] }
-tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
+serde_with = "3.4.0"
+url = "2.4.1"
+tracing = "0.1.40"
+clap = { version = "4.4.7", features = ["derive", "env", "cargo"] }
+minijinja = { version = "1.0.9", features = [
+    "unstable_machinery",
+    "custom_syntax",
+] }
+tracing-subscriber = { version = "0.3.17", features = [
+    "env-filter",
+    "fmt",
+    "ansi",
+] }
+marked-yaml = { git = "https://github.com/GrayJack/marked-data.git", branch = "expand", package = "marked-yaml" }
+miette = { version = "5.10.0", features = ["fancy"] }
+linked-hash-map = "0.5.6"
 num_cpus = "1.16.0"
 goblin = "0.7.1"
 scroll = "0.11.0"
 pathdiff = "0.2.1"
-comfy-table = "7.0.1"
-futures = "0.3.28"
-indicatif = "0.17.5"
+comfy-table = "7.1.0"
+futures = "0.3.29"
+indicatif = "0.17.7"
 console = { version = "0.15.7", features = ["windows-console-colors"] }
 once_cell = "1.18.0"
-thiserror = "1.0.43"
-tempfile = "3.6.0"
-chrono = "0.4.26"
-sha1 = "0.10.5"
-git2 = { version = "0.17.2", features = ["vendored-openssl"] }
+thiserror = "1.0.50"
+tempfile = "3.8.1"
+chrono = "0.4.31"
+sha1 = "0.10.6"
+spdx = "0.10.2"
+git2 = { version = "0.18.1", features = ["vendored-openssl"], optional = true }
 fs_extra = "1.3.0"
+ignore = "0.4.20"
+globset = "0.4.13"
+tracing-indicatif = "0.3.5"
+clap-verbosity-flag = "2.1.0"
+tracing-core = "0.1.32"
 
 [dev-dependencies]
-insta = {version = "1.31.0", features = ["yaml"] }
-rstest = "0.18.1"
+insta = { version = "1.34.0", features = ["yaml"] }
+rstest = "0.18.2"
 
 [profile.dev.package."*"]
 opt-level = 3
@@ -76,9 +93,26 @@ opt-level = 3
 [package.metadata.cross.target.x86_64-unknown-linux-gnu]
 pre-build = [
     "dpkg --add-architecture $CROSS_DEB_ARCH",
-    "apt-get update && apt-get install --assume-yes libssl-dev:$CROSS_DEB_ARCH"
+    "apt-get update && apt-get install --assume-yes libssl-dev:$CROSS_DEB_ARCH",
 ]
 
-[patch.'https://github.com/mamba-org/rattler']
-rattler_package_streaming = { git = "https://github.com/johnhany97/rattler", branch = "jayad/fix-tar" }
-rattler_networking = { git = "https://github.com/johnhany97/rattler", branch = "jayad/fix-tar" }
+[patch.crates-io]
+rattler = { git = "https://github.com/mamba-org/rattler", branch = "main" }
+rattler_conda_types = { git = "https://github.com/mamba-org/rattler", branch = "main" }
+rattler_digest = { git = "https://github.com/mamba-org/rattler", branch = "main" }
+rattler_networking = { git = "https://github.com/mamba-org/rattler", branch = "main" }
+rattler_repodata_gateway = { git = "https://github.com/mamba-org/rattler", branch = "main" }
+rattler_shell = { git = "https://github.com/mamba-org/rattler", branch = "main" }
+rattler_solve = { git = "https://github.com/mamba-org/rattler", branch = "main" }
+rattler_virtual_packages = { git = "https://github.com/mamba-org/rattler", branch = "main" }
+rattler_package_streaming = { git = "https://github.com/mamba-org/rattler", branch = "main" }
+
+# rattler = { path = "../rattler/crates/rattler" }
+# rattler_conda_types = { path = "../rattler/crates/rattler_conda_types" }
+# rattler_digest = { path = "../rattler/crates/rattler_digest" }
+# rattler_networking = { path = "../rattler/crates/rattler_networking" }
+# rattler_repodata_gateway = { path = "../rattler/crates/rattler_repodata_gateway" }
+# rattler_shell = { path = "../rattler/crates/rattler_shell" }
+# rattler_solve = { path = "../rattler/crates/rattler_solve" }
+# rattler_virtual_packages = { path = "../rattler/crates/rattler_virtual_packages" }
+# rattler_package_streaming = { path = "../rattler/crates/rattler_package_streaming" }

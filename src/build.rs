@@ -10,12 +10,13 @@ use std::process::{Command, Stdio};
 use std::{io::Read, path::PathBuf};
 
 use itertools::Itertools;
+use miette::IntoDiagnostic;
 use rattler_shell::shell;
 
 use crate::env_vars::write_env_script;
 use crate::metadata::{Directories, Output};
 use crate::packaging::{package_conda, record_files};
-use crate::render::resolved_dependencies::resolve_dependencies;
+use crate::render::resolved_dependencies::{install_environments, resolve_dependencies};
 use crate::source::fetch_sources;
 use crate::test::TestConfiguration;
 use crate::{index, test, tool_configuration};
@@ -28,27 +29,39 @@ pub fn get_conda_build_script(
     let recipe = &output.recipe;
 
     let default_script = if output.build_configuration.target_platform.is_windows() {
-        "build.bat"
+        ["build.bat".to_owned()]
     } else {
-        "build.sh"
+        ["build.sh".to_owned()]
     };
 
-    let script = recipe
-        .build
-        .script
-        .clone()
-        .unwrap_or_else(|| vec![default_script.into()])
-        .iter()
-        .join("\n");
+    let script = if recipe.build().scripts().is_empty() {
+        &default_script
+    } else {
+        recipe.build().scripts()
+    };
+
+    let script = script.iter().join("\n");
 
     let script = if script.ends_with(".sh") || script.ends_with(".bat") {
         let recipe_file = directories.recipe_dir.join(script);
         tracing::info!("Reading recipe file: {:?}", recipe_file);
 
-        let mut orig_build_file = File::open(recipe_file)?;
-        let mut orig_build_file_text = String::new();
-        orig_build_file.read_to_string(&mut orig_build_file_text)?;
-        orig_build_file_text
+        if !recipe_file.exists() {
+            if recipe.build().scripts().is_empty() {
+                tracing::info!("Empty build script");
+                String::new()
+            } else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("Recipe file {:?} does not exist", recipe_file),
+                ));
+            }
+        } else {
+            let mut orig_build_file = File::open(recipe_file)?;
+            let mut orig_build_file_text = String::new();
+            orig_build_file.read_to_string(&mut orig_build_file_text)?;
+            orig_build_file_text
+        }
     } else {
         script
     };
@@ -103,7 +116,7 @@ fn run_process_with_replacements(
     cwd: &PathBuf,
     args: &[OsString],
     replacements: &[(&str, &str)],
-) -> anyhow::Result<()> {
+) -> miette::Result<()> {
     let mut child = Command::new(command)
         .current_dir(cwd)
         .args(args)
@@ -121,9 +134,9 @@ fn run_process_with_replacements(
                 let filtered_line = replacements
                     .iter()
                     .fold(line, |acc, (from, to)| acc.replace(from, to));
-                println!("{}", filtered_line);
+                tracing::info!("{}", filtered_line);
             } else {
-                eprintln!("Error reading output: {:?}", line);
+                tracing::warn!("Error reading output: {:?}", line);
             }
         }
     }
@@ -131,7 +144,7 @@ fn run_process_with_replacements(
     let status = child.wait().expect("Failed to wait on child");
 
     if !status.success() {
-        return Err(anyhow::anyhow!("Build failed"));
+        return Err(miette::miette!("Build failed"));
     }
 
     Ok(())
@@ -142,39 +155,53 @@ fn run_process_with_replacements(
 pub async fn run_build(
     output: &Output,
     tool_configuration: tool_configuration::Configuration,
-) -> anyhow::Result<PathBuf> {
+) -> miette::Result<PathBuf> {
     let directories = &output.build_configuration.directories;
 
     index::index(
         &directories.output_dir,
         Some(&output.build_configuration.target_platform),
-    )?;
+    )
+    .into_diagnostic()?;
 
     // Add the local channel to the list of channels
     let mut channels = vec![directories.output_dir.to_string_lossy().to_string()];
     channels.extend(output.build_configuration.channels.clone());
 
-    if let Some(source) = &output.recipe.source {
+    if !output.recipe.sources().is_empty() {
         fetch_sources(
-            source,
+            output.recipe.sources(),
             &directories.work_dir,
             &directories.recipe_dir,
             &directories.output_dir,
         )
-        .await?;
+        .await
+        .into_diagnostic()?;
     }
 
-    let finalized_dependencies =
-        resolve_dependencies(output, &channels, tool_configuration).await?;
+    let output = if output.finalized_dependencies.is_some() {
+        tracing::info!("Using finalized dependencies");
 
-    // The output with the resolved dependencies
-    let output = Output {
-        finalized_dependencies: Some(finalized_dependencies),
-        recipe: output.recipe.clone(),
-        build_configuration: output.build_configuration.clone(),
+        // The output already has the finalized dependencies, so we can just use it as-is
+        install_environments(output, tool_configuration.clone())
+            .await
+            .into_diagnostic()?;
+        output.clone()
+    } else {
+        let finalized_dependencies =
+            resolve_dependencies(output, &channels, tool_configuration.clone())
+                .await
+                .into_diagnostic()?;
+
+        // The output with the resolved dependencies
+        Output {
+            finalized_dependencies: Some(finalized_dependencies),
+            recipe: output.recipe.clone(),
+            build_configuration: output.build_configuration.clone(),
+        }
     };
 
-    let build_script = get_conda_build_script(&output, directories)?;
+    let build_script = get_conda_build_script(&output, directories).into_diagnostic()?;
     tracing::info!("Work dir: {:?}", &directories.work_dir);
     tracing::info!("Build script: {:?}", build_script);
 
@@ -220,21 +247,24 @@ pub async fn run_build(
         &difference,
         &directories.build_prefix,
         &directories.output_dir,
-    )?;
+        output.build_configuration.package_format,
+    )
+    .into_diagnostic()?;
 
-    if !output.build_configuration.no_clean {
-        fs::remove_dir_all(&directories.build_dir)?;
+    if !tool_configuration.no_clean {
+        fs::remove_dir_all(&directories.build_dir).into_diagnostic()?;
     }
 
     index::index(
         &directories.output_dir,
         Some(&output.build_configuration.target_platform),
-    )?;
+    )
+    .into_diagnostic()?;
 
     let test_dir = directories.work_dir.join("test");
-    fs::create_dir_all(&test_dir)?;
+    fs::create_dir_all(&test_dir).into_diagnostic()?;
 
-    println!("{}", output);
+    tracing::info!("{}", output);
 
     tracing::info!("Running tests");
 
@@ -243,14 +273,15 @@ pub async fn run_build(
         &TestConfiguration {
             test_prefix: test_dir.clone(),
             target_platform: Some(output.build_configuration.target_platform),
-            keep_test_prefix: output.build_configuration.no_clean,
+            keep_test_prefix: tool_configuration.no_clean,
             channels,
         },
     )
-    .await?;
+    .await
+    .into_diagnostic()?;
 
-    if !output.build_configuration.no_clean {
-        fs::remove_dir_all(&directories.build_dir)?;
+    if !tool_configuration.no_clean {
+        fs::remove_dir_all(&directories.build_dir).into_diagnostic()?;
     }
 
     Ok(result)

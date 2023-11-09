@@ -16,7 +16,7 @@ use rattler_repodata_gateway::fetch::{
     CacheResult, DownloadProgress, FetchRepoDataError, FetchRepoDataOptions,
 };
 use rattler_repodata_gateway::sparse::SparseRepoData;
-use rattler_solve::{libsolv_c::Solver, SolverImpl, SolverTask};
+use rattler_solve::{resolvo::Solver, SolverImpl, SolverTask};
 
 use std::{
     borrow::Cow,
@@ -51,7 +51,7 @@ fn print_as_table(packages: &Vec<RepoDataRecord>) {
         };
 
         table.add_row(vec![
-            package.package_record.name.clone(),
+            package.package_record.name.as_normalized().to_string(),
             package.package_record.version.to_string(),
             package.package_record.build.clone(),
             channel_short,
@@ -60,7 +60,7 @@ fn print_as_table(packages: &Vec<RepoDataRecord>) {
         ]);
     }
 
-    println!("\n{table}");
+    tracing::info!("\n{table}");
 }
 
 pub async fn create_environment(
@@ -77,11 +77,11 @@ pub async fn create_environment(
     // Find the default cache directory. Create it if it doesn't exist yet.
     let cache_dir = rattler::default_cache_dir()?;
 
-    println!("\nResolving for environment specs:");
+    tracing::info!("\nResolving for environment specs:");
     for spec in specs {
-        println!(" - {}", spec);
+        tracing::info!(" - {}", spec);
     }
-    println!("\n");
+    tracing::info!("\n");
 
     std::fs::create_dir_all(&cache_dir)
         .map_err(|e| anyhow::anyhow!("could not create cache directory: {}", e))?;
@@ -128,7 +128,7 @@ pub async fn create_environment(
                     platform,
                     &repodata_cache,
                     download_client.clone(),
-                    &tool_configuration.multi_progress_indicator,
+                    tool_configuration.multi_progress_indicator.clone(),
                     platform != Platform::NoArch,
                 )
                 .await
@@ -139,17 +139,13 @@ pub async fn create_environment(
         .await
         // Collect into another iterator where we extract the first erroneous result
         .into_iter()
-        .filter_map(|res| match res {
-            Ok(Some(data)) => Some(Ok(data)), // If Ok contains Some, keep the data
-            Ok(None) => None,                 // If Ok contains None, discard it
-            Err(e) => Some(Err(e)),           // If Err, keep it as is
-        })
+        .filter_map(Result::transpose)
         .collect::<Result<Vec<_>, _>>()?;
 
     // Get the package names from the matchspecs so we can only load the package records that we need.
-    let package_names = specs.iter().filter_map(|spec| spec.name.as_ref());
+    let package_names = specs.iter().filter_map(|spec| spec.name.clone());
     let repodatas = wrap_in_progress("parsing repodata", move || {
-        SparseRepoData::load_records_recursive(&sparse_repo_datas, package_names, None)
+        SparseRepoData::load_records_recursive(&sparse_repo_datas, package_names, None, true)
     })?;
 
     // Determine virtual packages of the system. These packages define the capabilities of the
@@ -182,6 +178,26 @@ pub async fn create_environment(
     // we need to apply to our environment to bring it up to date.
     let required_packages = wrap_in_progress("solving", move || Solver.solve(solver_task))?;
 
+    install_packages(
+        &required_packages,
+        target_platform,
+        target_prefix,
+        &cache_dir,
+        tool_configuration,
+    )
+    .await?;
+
+    Ok(required_packages)
+}
+
+pub async fn install_packages(
+    required_packages: &Vec<RepoDataRecord>,
+    target_platform: &Platform,
+    target_prefix: &Path,
+    cache_dir: &Path,
+    tool_configuration: &tool_configuration::Configuration,
+) -> anyhow::Result<()> {
+    let installed_packages = vec![];
     // Construct a transaction to
     let transaction = Transaction::from_current_and_desired(
         installed_packages,
@@ -189,30 +205,30 @@ pub async fn create_environment(
         *target_platform,
     )?;
 
-    print_as_table(&required_packages);
+    print_as_table(required_packages);
 
     if !transaction.operations.is_empty() {
         // Execute the operations that are returned by the solver.
         execute_transaction(
             transaction,
             target_prefix,
-            &cache_dir,
+            cache_dir,
             tool_configuration.client.clone(),
             tool_configuration.multi_progress_indicator.clone(),
         )
         .await?;
-        println!(
+        tracing::info!(
             "{} Successfully updated the environment",
             console::style(console::Emoji("✔", "")).green(),
         );
     } else {
-        println!(
+        tracing::info!(
             "{} Already up to date",
             console::style(console::Emoji("✔", "")).green(),
         );
     }
 
-    Ok(required_packages)
+    Ok(())
 }
 
 /// Executes the transaction on the given environment.
@@ -415,7 +431,11 @@ async fn install_package_to_environment(
         // Write the conda-meta information
         let pkg_meta_path = conda_meta_path.join(format!(
             "{}-{}-{}.json",
-            prefix_record.repodata_record.package_record.name,
+            prefix_record
+                .repodata_record
+                .package_record
+                .name
+                .as_normalized(),
             prefix_record.repodata_record.package_record.version,
             prefix_record.repodata_record.package_record.build
         ));
@@ -460,7 +480,7 @@ async fn remove_package_from_environment(
     // Remove the conda-meta file
     let conda_meta_path = target_prefix.join("conda-meta").join(format!(
         "{}-{}-{}.json",
-        package.repodata_record.package_record.name,
+        package.repodata_record.package_record.name.as_normalized(),
         package.repodata_record.package_record.version,
         package.repodata_record.package_record.build
     ));
@@ -487,7 +507,7 @@ async fn fetch_repo_data_records_with_progress(
     platform: Platform,
     repodata_cache: &Path,
     client: AuthenticatedClient,
-    multi_progress: &indicatif::MultiProgress,
+    multi_progress: indicatif::MultiProgress,
     allow_not_found: bool,
 ) -> anyhow::Result<Option<SparseRepoData>> {
     // Create a progress bar
@@ -504,14 +524,14 @@ async fn fetch_repo_data_records_with_progress(
     let result = rattler_repodata_gateway::fetch::fetch_repo_data(
         channel.platform_url(platform),
         client,
-        repodata_cache,
+        repodata_cache.to_path_buf(),
         FetchRepoDataOptions {
-            download_progress: Some(Box::new(move |DownloadProgress { total, bytes }| {
-                download_progress_bar.set_length(total.unwrap_or(bytes));
-                download_progress_bar.set_position(bytes);
-            })),
             ..Default::default()
         },
+        Some(Box::new(move |DownloadProgress { total, bytes }| {
+            download_progress_bar.set_length(total.unwrap_or(bytes));
+            download_progress_bar.set_position(bytes);
+        })),
     )
     .await;
 
@@ -553,7 +573,7 @@ async fn fetch_repo_data_records_with_progress(
         }
         Ok(Err(err)) => {
             progress_bar.set_style(errored_progress_style());
-            progress_bar.finish_with_message("Error");
+            progress_bar.finish_with_message(format!("Error: {:?}", err));
             Err(err.into())
         }
         Err(err) => match err.try_into_panic() {
@@ -562,9 +582,9 @@ async fn fetch_repo_data_records_with_progress(
             }
             Err(_) => {
                 progress_bar.set_style(errored_progress_style());
-                progress_bar.finish_with_message("Cancelled..");
+                progress_bar.finish_with_message("Canceled...");
                 // Since the task was cancelled most likely the whole async stack is being cancelled.
-                Err(anyhow::anyhow!("cancelled"))
+                Err(anyhow::anyhow!("canceled"))
             }
         },
     }

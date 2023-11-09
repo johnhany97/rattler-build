@@ -14,36 +14,55 @@ use indicatif::HumanBytes;
 use rattler::package_cache::CacheKey;
 use rattler_conda_types::{
     package::{PackageFile, RunExportsJson},
-    MatchSpec, Platform, RepoDataRecord, Version, VersionSpec,
+    MatchSpec, PackageName, Platform, RepoDataRecord, Version, VersionSpec,
 };
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::{
-    dependency_list::{Dependency, DependencyList},
-    solver::create_environment,
-};
+use super::solver::create_environment;
+use crate::recipe::parser::Dependency;
+use crate::render::solver::install_packages;
+use serde_with::{serde_as, DisplayFromStr};
 
 /// A enum to keep track of where a given Dependency comes from
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DependencyInfo {
     /// The dependency is a direct dependency of the package, with a variant applied
     /// from the variant config
-    Variant { spec: MatchSpec, variant: String },
+    Variant {
+        #[serde_as(as = "DisplayFromStr")]
+        spec: MatchSpec,
+        variant: String,
+    },
     /// This is a special compiler dependency (e.g. `{{ compiler('c') }}`
-    Compiler { spec: MatchSpec },
+    Compiler {
+        #[serde_as(as = "DisplayFromStr")]
+        spec: MatchSpec,
+    },
     /// This is a special pin dependency (e.g. `{{ pin_subpackage('foo', exact=True) }}`
-    PinSubpackage { spec: MatchSpec },
+    PinSubpackage {
+        #[serde_as(as = "DisplayFromStr")]
+        spec: MatchSpec,
+    },
     /// This is a special run_exports dependency (e.g. `{{ pin_compatible('foo') }}`
-    PinCompatible { spec: MatchSpec },
+    PinCompatible {
+        #[serde_as(as = "DisplayFromStr")]
+        spec: MatchSpec,
+    },
     /// This is a special run_exports dependency from another package
     RunExports {
+        #[serde_as(as = "DisplayFromStr")]
         spec: MatchSpec,
         from: String,
         source_package: String,
     },
     /// This is a regular dependency of the package without any modifications
-    Raw { spec: MatchSpec },
+    Raw {
+        #[serde_as(as = "DisplayFromStr")]
+        spec: MatchSpec,
+    },
     /// This is a transient dependency of the package, which is not a direct dependency
     /// of the package, but is a dependency of a dependency
     Transient,
@@ -80,7 +99,7 @@ impl DependencyInfo {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FinalizedRunDependencies {
     pub depends: Vec<DependencyInfo>,
     pub constrains: Vec<DependencyInfo>,
@@ -88,11 +107,11 @@ pub struct FinalizedRunDependencies {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolvedDependencies {
     pub specs: Vec<DependencyInfo>,
     pub resolved: Vec<RepoDataRecord>,
-    pub run_exports: HashMap<String, RunExportsJson>,
+    pub run_exports: HashMap<PackageName, RunExportsJson>,
 }
 
 fn short_channel(channel: &str) -> String {
@@ -144,7 +163,7 @@ impl Display for ResolvedDependencies {
 
         for (record, dep_info) in &explicit {
             table.add_row(vec![
-                record.package_record.name.clone(),
+                record.package_record.name.as_normalized().to_string(),
                 dep_info.render(),
                 record.package_record.version.to_string(),
                 record.package_record.build.to_string(),
@@ -158,7 +177,7 @@ impl Display for ResolvedDependencies {
         }
         for (record, _) in &transient {
             table.add_row(vec![
-                record.package_record.name.clone(),
+                record.package_record.name.as_normalized().to_string(),
                 "".to_string(),
                 record.package_record.version.to_string(),
                 record.package_record.build.to_string(),
@@ -177,7 +196,7 @@ impl Display for ResolvedDependencies {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FinalizedDependencies {
     pub build: Option<ResolvedDependencies>,
     pub host: Option<ResolvedDependencies>,
@@ -193,7 +212,7 @@ pub enum ResolveError {
 /// Apply a variant to a dependency list and resolve all pin_subpackage and compiler
 /// dependencies
 pub fn apply_variant(
-    raw_specs: &DependencyList,
+    raw_specs: &[Dependency],
     build_configuration: &BuildConfiguration,
 ) -> Result<Vec<DependencyInfo>, ResolveError> {
     let variant = &build_configuration.variant;
@@ -208,7 +227,7 @@ pub fn apply_variant(
                     let m = m.clone();
                     if m.version.is_none() && m.build.is_none() {
                         if let Some(name) = &m.name {
-                            if let Some(version) = variant.get(name) {
+                            if let Some(version) = variant.get(name.as_normalized()) {
                                 // if the variant starts with an alphanumeric character,
                                 // we have to add a '=' to the version spec
                                 let mut spec = version.clone();
@@ -237,10 +256,10 @@ pub fn apply_variant(
                     DependencyInfo::Raw { spec: m }
                 }
                 Dependency::PinSubpackage(pin) => {
-                    let name = &pin.pin_subpackage.name;
+                    let name = &pin.pin_value().name;
                     let subpackage = subpackages.get(name).expect("Invalid subpackage");
                     let pinned = pin
-                        .pin_subpackage
+                        .pin_value()
                         .apply(
                             &Version::from_str(&subpackage.version)
                                 .expect("could not parse version"),
@@ -254,14 +273,14 @@ pub fn apply_variant(
                         panic!("Noarch packages cannot have compilers");
                     }
 
-                    let compiler_variant = format!("{}_compiler", compiler.compiler);
+                    let compiler_variant = format!("{}_compiler", compiler.language());
                     let compiler_name = variant
                         .get(&compiler_variant)
                         .map(|s| s.to_string())
                         .unwrap_or_else(|| {
                             // defaults
                             if target_platform.is_linux() {
-                                let default_compiler = match compiler.compiler.as_str() {
+                                let default_compiler = match compiler.language() {
                                     "c" => "gcc".to_string(),
                                     "cxx" => "gxx".to_string(),
                                     "fortran" => "gfortran".to_string(),
@@ -269,13 +288,13 @@ pub fn apply_variant(
                                     _ => {
                                         panic!(
                                             "No default value for compiler: {}",
-                                            compiler.compiler
+                                            compiler.language()
                                         )
                                     }
                                 };
                                 default_compiler
                             } else if target_platform.is_osx() {
-                                let default_compiler = match compiler.compiler.as_str() {
+                                let default_compiler = match compiler.language() {
                                     "c" => "clang".to_string(),
                                     "cxx" => "clangxx".to_string(),
                                     "fortran" => "gfortran".to_string(),
@@ -283,13 +302,13 @@ pub fn apply_variant(
                                     _ => {
                                         panic!(
                                             "No default value for compiler: {}",
-                                            compiler.compiler
+                                            compiler.language()
                                         )
                                     }
                                 };
                                 default_compiler
                             } else if target_platform.is_windows() {
-                                let default_compiler = match compiler.compiler.as_str() {
+                                let default_compiler = match compiler.language() {
                                     // note with conda-build, these are dependent on the python version
                                     // we could also check the variant for the python version here!
                                     "c" => "vs2017".to_string(),
@@ -299,13 +318,16 @@ pub fn apply_variant(
                                     _ => {
                                         panic!(
                                             "No default value for compiler: {}",
-                                            compiler.compiler
+                                            compiler.language()
                                         )
                                     }
                                 };
                                 default_compiler
                             } else {
-                                panic!("Unknown target platform: {}", target_platform);
+                                panic!(
+                                    "Could not find compiler ({}) configuration for platform: {target_platform}",
+                                    compiler.language(),
+                                )
                             }
                         });
 
@@ -337,7 +359,7 @@ fn collect_run_exports_from_env(
     env: &[RepoDataRecord],
     cache_dir: &Path,
     filter: impl Fn(&RepoDataRecord) -> bool,
-) -> Result<HashMap<String, RunExportsJson>, std::io::Error> {
+) -> Result<HashMap<PackageName, RunExportsJson>, std::io::Error> {
     let mut run_exports = HashMap::new();
     for pkg in env {
         if !filter(pkg) {
@@ -352,6 +374,39 @@ fn collect_run_exports_from_env(
         }
     }
     Ok(run_exports)
+}
+
+pub async fn install_environments(
+    output: &Output,
+    tool_configuration: tool_configuration::Configuration,
+) -> Result<(), ResolveError> {
+    let cache_dir = rattler::default_cache_dir().expect("Could not get default cache dir");
+
+    let dependencies = output.finalized_dependencies.as_ref().unwrap();
+
+    if let Some(build_deps) = dependencies.build.as_ref() {
+        install_packages(
+            &build_deps.resolved,
+            &output.build_configuration.build_platform,
+            &output.build_configuration.directories.build_prefix,
+            &cache_dir,
+            &tool_configuration,
+        )
+        .await?;
+    }
+
+    if let Some(host_deps) = dependencies.host.as_ref() {
+        install_packages(
+            &host_deps.resolved,
+            &output.build_configuration.host_platform,
+            &output.build_configuration.directories.host_prefix,
+            &cache_dir,
+            &tool_configuration,
+        )
+        .await?;
+    }
+
+    Ok(())
 }
 
 /// This function resolves the dependencies of a recipe.
@@ -371,10 +426,10 @@ pub async fn resolve_dependencies(
     let cache_dir = rattler::default_cache_dir().expect("Could not get default cache dir");
     let pkgs_dir = cache_dir.join("pkgs");
 
-    let reqs = &output.recipe.requirements;
+    let reqs = &output.recipe.requirements();
 
     let build_env = if !reqs.build.is_empty() {
-        let specs = apply_variant(&reqs.build, &output.build_configuration)?;
+        let specs = apply_variant(reqs.build(), &output.build_configuration)?;
 
         let match_specs = specs.iter().map(|s| s.spec().clone()).collect::<Vec<_>>();
 
@@ -393,7 +448,8 @@ pub async fn resolve_dependencies(
                 .iter()
                 .any(|m| Some(&rec.package_record.name) == m.name.as_ref());
 
-            if let Some(ignore_run_exports_from) = &output.recipe.build.ignore_run_exports_from {
+            let ignore_run_exports_from = output.recipe.build().ignore_run_exports_from();
+            if !ignore_run_exports_from.is_empty() {
                 res && !ignore_run_exports_from.contains(&rec.package_record.name)
             } else {
                 res
@@ -413,22 +469,24 @@ pub async fn resolve_dependencies(
     };
 
     // host env
-    let mut specs = apply_variant(&reqs.host, &output.build_configuration)?;
+    let mut specs = apply_variant(reqs.host(), &output.build_configuration)?;
 
-    let clone_specs =
-        |name: &str, env: &str, specs: &[String]| -> Result<Vec<DependencyInfo>, ResolveError> {
-            let mut cloned = Vec::new();
-            for spec in specs {
-                let spec = MatchSpec::from_str(spec).expect("...");
-                let dep = DependencyInfo::RunExports {
-                    spec,
-                    from: env.to_string(),
-                    source_package: name.to_string(),
-                };
-                cloned.push(dep);
-            }
-            Ok(cloned)
-        };
+    let clone_specs = |name: &PackageName,
+                       env: &str,
+                       specs: &[String]|
+     -> Result<Vec<DependencyInfo>, ResolveError> {
+        let mut cloned = Vec::new();
+        for spec in specs {
+            let spec = MatchSpec::from_str(spec).expect("...");
+            let dep = DependencyInfo::RunExports {
+                spec,
+                from: env.to_string(),
+                source_package: name.as_normalized().to_string(),
+            };
+            cloned.push(dep);
+        }
+        Ok(cloned)
+    };
 
     // add the run exports of the build environment
     if let Some(build_env) = &build_env {
@@ -468,11 +526,11 @@ pub async fn resolve_dependencies(
         None
     };
 
-    let run_depends = apply_variant(&reqs.run, &output.build_configuration)?;
+    let depends = apply_variant(&reqs.run, &output.build_configuration)?;
 
-    let run_constrains = apply_variant(&reqs.run_constrained, &output.build_configuration)?;
+    let constrains = apply_variant(&reqs.run_constrained, &output.build_configuration)?;
 
-    let render_run_exports = |run_export: &DependencyList| -> Vec<String> {
+    let render_run_exports = |run_export: &[Dependency]| -> Vec<String> {
         let rendered = apply_variant(run_export, &output.build_configuration).unwrap();
         rendered
             .iter()
@@ -480,23 +538,24 @@ pub async fn resolve_dependencies(
             .collect::<Vec<_>>()
     };
 
-    let run_exports = &output
-        .recipe
-        .build
-        .run_exports
-        .as_ref()
-        .map(|run_exports| RunExportsJson {
-            strong: render_run_exports(&run_exports.strong),
-            weak: render_run_exports(&run_exports.weak),
-            noarch: render_run_exports(&run_exports.noarch),
-            strong_constrains: render_run_exports(&run_exports.strong_constrains),
-            weak_constrains: render_run_exports(&run_exports.weak_constrains),
-        });
+    let run_exports = output.recipe.build().run_exports();
+
+    let run_exports = if !run_exports.is_empty() {
+        Some(RunExportsJson {
+            strong: render_run_exports(run_exports.strong()),
+            weak: render_run_exports(run_exports.weak()),
+            noarch: render_run_exports(run_exports.noarch()),
+            strong_constrains: render_run_exports(run_exports.strong_constrains()),
+            weak_constrains: render_run_exports(run_exports.weak_constrains()),
+        })
+    } else {
+        None
+    };
 
     let mut run_specs = FinalizedRunDependencies {
-        depends: run_depends,
-        constrains: run_constrains,
-        run_exports: run_exports.clone(),
+        depends,
+        constrains,
+        run_exports,
     };
 
     // Propagate run exports from host env to run env

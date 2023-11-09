@@ -1,24 +1,68 @@
 //! Functions to read and parse variant configuration files.
 
-use std::collections::{HashMap, HashSet};
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    path::PathBuf,
+};
 
-use serde::Deserialize;
-use serde::Serialize;
-use serde_with::formats::PreferOne;
-use serde_with::serde_as;
-use serde_with::OneOrMany;
-use serde_yaml::Value as YamlValue;
+use miette::Diagnostic;
+use serde::{Deserialize, Serialize};
+use serde_with::{formats::PreferOne, serde_as, OneOrMany};
 use thiserror::Error;
 
-use crate::selectors::{flatten_selectors, flatten_toplevel, SelectorConfig};
-use crate::used_variables::extract_dependencies;
-use crate::used_variables::used_vars_from_expressions;
+use crate::{
+    _partialerror,
+    recipe::{
+        custom_yaml::{HasSpan, Node, RenderedMappingNode, RenderedNode, TryConvertNode},
+        error::{ErrorKind, ParsingError, PartialParsingError},
+        parser::Recipe,
+        Jinja, Render,
+    },
+    selectors::SelectorConfig,
+    used_variables::used_vars_from_expressions,
+};
+
+type OutputVariantsTuple = (Node, Vec<BTreeMap<String, String>>);
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Pin {
     pub max_pin: Option<String>,
     pub min_pin: Option<String>,
+}
+
+impl TryConvertNode<Pin> for RenderedNode {
+    fn try_convert(&self, name: &str) -> Result<Pin, PartialParsingError> {
+        self.as_mapping()
+            .ok_or_else(|| _partialerror!(*self.span(), ErrorKind::ExpectedMapping,))
+            .and_then(|map| map.try_convert(name))
+    }
+}
+
+impl TryConvertNode<Pin> for RenderedMappingNode {
+    fn try_convert(&self, name: &str) -> Result<Pin, PartialParsingError> {
+        let mut pin = Pin::default();
+
+        for (key, value) in self.iter() {
+            let key_str = key.as_str();
+            match key_str {
+                "max_pin" => {
+                    pin.max_pin = value.try_convert(key_str)?;
+                }
+                "min_pin" => {
+                    pin.min_pin = value.try_convert(key_str)?;
+                }
+                _ => {
+                    return Err(_partialerror!(
+                        *key.span(),
+                        ErrorKind::InvalidField(key_str.to_string().into()),
+                        help = format!("Valid fields for {name} are: max_pin, min_pin")
+                    ))
+                }
+            }
+        }
+
+        Ok(pin)
+    }
 }
 
 #[serde_as]
@@ -32,13 +76,17 @@ pub struct VariantConfig {
     pub variants: BTreeMap<String, Vec<String>>,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, Diagnostic)]
 pub enum VariantConfigError {
     #[error("Could not parse variant config file ({0}): {1}")]
     ParseError(PathBuf, serde_yaml::Error),
 
     #[error("Could not open file ({0}): {1}")]
     IOError(PathBuf, std::io::Error),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    NewParseError(#[from] ParsingError),
 }
 
 impl VariantConfig {
@@ -112,17 +160,18 @@ impl VariantConfig {
         let mut variant_configs = Vec::new();
 
         for filename in files {
-            let file = std::fs::File::open(filename)
+            let file = std::fs::read_to_string(filename)
                 .map_err(|e| VariantConfigError::IOError(filename.clone(), e))?;
-            let reader = std::io::BufReader::new(file);
-            let mut yaml_value = serde_yaml::from_reader(reader)
-                .map_err(|e| VariantConfigError::ParseError(filename.clone(), e))?;
+            let yaml_node = Node::parse_yaml(0, &file)?;
+            let jinja = Jinja::new(selector_config.clone());
+            let rendered_node: RenderedNode = yaml_node
+                .render(&jinja, filename.to_string_lossy().as_ref())
+                .map_err(|e| ParsingError::from_partial(&file, e))?;
+            let config: VariantConfig = rendered_node
+                .try_convert(filename.to_string_lossy().as_ref())
+                .map_err(|e| ParsingError::from_partial(&file, e))?;
 
-            if let Some(yaml_value) = flatten_toplevel(&mut yaml_value, selector_config) {
-                let config: VariantConfig = serde_yaml::from_value(yaml_value)
-                    .map_err(|e| VariantConfigError::ParseError(filename.clone(), e))?;
-                variant_configs.push(config);
-            }
+            variant_configs.push(config);
         }
 
         let mut final_config = VariantConfig::default();
@@ -206,7 +255,7 @@ impl VariantConfig {
 
         let variant_keys = used_zip_keys
             .into_iter()
-            .chain(variant_keys.into_iter())
+            .chain(variant_keys)
             .collect::<Vec<_>>();
 
         // get all combinations of variant keys
@@ -233,34 +282,91 @@ impl VariantConfig {
         &self,
         recipe: &str,
         selector_config: &SelectorConfig,
-    ) -> Result<Vec<BTreeMap<String, String>>, VariantError> {
-        let mut used_variables = used_vars_from_expressions(recipe);
+    ) -> Result<Vec<OutputVariantsTuple>, VariantError> {
+        use crate::recipe::parser::{find_outputs_from_src, Dependency};
 
-        // now render all selectors with the used variables
-        let combinations = self.combinations(&used_variables)?;
+        // First find all outputs from the recipe
+        let outputs = find_outputs_from_src(recipe)?;
 
-        let recipe_parsed: YamlValue = serde_yaml::from_str(recipe).unwrap();
-        for _ in combinations {
-            let mut val = recipe_parsed.clone();
-            if let Some(flattened_recipe) = flatten_selectors(&mut val, selector_config) {
-                // extract all dependencies from the flattened recipe
-                let dependencies = extract_dependencies(&flattened_recipe);
-                for dependency in dependencies {
-                    used_variables.insert(dependency);
+        // Then find all used variables from the each output recipe
+        let mut recipes = Vec::with_capacity(outputs.len());
+        for output in outputs {
+            let mut used_variables = used_vars_from_expressions(recipe);
+
+            // now render all selectors with the used variables
+            let combinations = self.combinations(&used_variables)?;
+
+            let parsed_recipe = Recipe::from_node(&output, selector_config.clone())
+                .map_err(|err| ParsingError::from_partial(recipe, err))?;
+
+            for _ in combinations {
+                let requirements = parsed_recipe.requirements();
+
+                // we do this in simple mode for now, but could later also do intersections
+                // with the real matchspec (e.g. build variants for python 3.1-3.10, but recipe
+                // says >=3.7 and then we only do 3.7-3.10)
+                requirements.all().for_each(|dep| match dep {
+                    Dependency::Spec(spec) => {
+                        if let Some(name) = &spec.name {
+                            let val = name.as_normalized().to_owned();
+                            used_variables.insert(val);
+                        }
+                    }
+                    Dependency::PinSubpackage(pin_sub) => {
+                        let val = pin_sub.pin_value().name.as_normalized().to_owned();
+                        used_variables.insert(val);
+                    }
+                    Dependency::Compiler(_) => (),
+                })
+            }
+
+            // special handling of CONDA_BUILD_SYSROOT
+            if used_variables.contains("c_compiler") || used_variables.contains("cxx_compiler") {
+                used_variables.insert("CONDA_BUILD_SYSROOT".to_string());
+            }
+
+            // also always add `target_platform` and `channel_targets`
+            used_variables.insert("target_platform".to_string());
+            used_variables.insert("channel_targets".to_string());
+
+            recipes.push((output, self.combinations(&used_variables)?));
+        }
+
+        Ok(recipes)
+    }
+}
+
+impl TryConvertNode<VariantConfig> for RenderedNode {
+    fn try_convert(&self, name: &str) -> Result<VariantConfig, PartialParsingError> {
+        self.as_mapping()
+            .ok_or_else(|| _partialerror!(*self.span(), ErrorKind::ExpectedMapping))
+            .and_then(|map| map.try_convert(name))
+    }
+}
+
+impl TryConvertNode<VariantConfig> for RenderedMappingNode {
+    fn try_convert(&self, _name: &str) -> Result<VariantConfig, PartialParsingError> {
+        let mut config = VariantConfig::default();
+
+        for (key, value) in self.iter() {
+            let key_str = key.as_str();
+            match key_str {
+                "pin_run_as_build" => {
+                    config.pin_run_as_build = value.try_convert(key_str)?;
                 }
-            };
+                "zip_keys" => {
+                    config.zip_keys = value.try_convert(key_str)?;
+                }
+                _ => {
+                    let variants: Option<Vec<_>> = value.try_convert(key_str)?;
+                    if let Some(variants) = variants {
+                        config.variants.insert(key_str.to_string(), variants);
+                    }
+                }
+            }
         }
 
-        // special handling of CONDA_BUILD_SYSROOT
-        if used_variables.contains("c_compiler") || used_variables.contains("cxx_compiler") {
-            used_variables.insert("CONDA_BUILD_SYSROOT".to_string());
-        }
-
-        // also always add `target_platform` and `channel_targets`
-        used_variables.insert("target_platform".to_string());
-        used_variables.insert("channel_targets".to_string());
-
-        self.combinations(&used_variables)
+        Ok(config)
     }
 }
 
@@ -301,10 +407,14 @@ impl VariantKey {
     }
 }
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Diagnostic)]
 pub enum VariantError {
     #[error("Zip key elements do not all have same length: {0}")]
     InvalidZipKeyLength(String),
+
+    #[error(transparent)]
+    #[diagnostic(transparent)]
+    RecipeParseError(#[from] ParsingError),
 }
 
 fn find_combinations(
@@ -331,34 +441,39 @@ fn find_combinations(
 
 #[cfg(test)]
 mod tests {
-    use crate::selectors::{flatten_toplevel, SelectorConfig};
+    use crate::selectors::SelectorConfig;
     use rattler_conda_types::Platform;
     use rstest::rstest;
-    use serde_yaml::Value as YamlValue;
 
     #[rstest]
     #[case("selectors/config_1.yaml")]
     fn test_flatten_selectors(#[case] filename: &str) {
         let test_data_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("test-data");
-        let yaml_file = std::fs::read_to_string(test_data_dir.join(filename)).unwrap();
-        let mut yaml: YamlValue = serde_yaml::from_str(&yaml_file).unwrap();
+        let yaml_file = std::fs::read_to_string(dbg!(test_data_dir.join(filename))).unwrap();
+        let yaml = Node::parse_yaml(0, &yaml_file).unwrap();
 
         let selector_config = SelectorConfig {
             target_platform: Platform::Linux64,
             build_platform: Platform::Linux64,
             variant: Default::default(),
+            hash: None,
         };
+        let jinja = Jinja::new(selector_config);
 
-        let res = flatten_toplevel(&mut yaml, &selector_config);
+        let res: RenderedNode = yaml.render(&jinja, "test1").unwrap();
+        let res: VariantConfig = res.try_convert("test1").unwrap();
         insta::assert_yaml_snapshot!(res);
 
         let selector_config = SelectorConfig {
             target_platform: Platform::Win64,
             build_platform: Platform::Win64,
             variant: Default::default(),
+            hash: None,
         };
+        let jinja = Jinja::new(selector_config);
 
-        let res = flatten_toplevel(&mut yaml, &selector_config);
+        let res: RenderedNode = yaml.render(&jinja, "test2").unwrap();
+        let res: VariantConfig = res.try_convert("test2").unwrap();
         insta::assert_yaml_snapshot!(res);
     }
 
@@ -370,6 +485,7 @@ mod tests {
             target_platform: Platform::Linux64,
             build_platform: Platform::Linux64,
             variant: Default::default(),
+            hash: None,
         };
 
         let variant = VariantConfig::from_files(&vec![yaml_file], &selector_config).unwrap();
