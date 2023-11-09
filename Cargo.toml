@@ -21,21 +21,21 @@ git = ['dep:git2']
 [dependencies]
 serde = { version = "1.0.190", features = ["derive"] }
 serde_yaml = "0.9.27"
-rattler = { version = "0.11.0", default-features = false }
-rattler_conda_types = { version = "0.11.0", default-features = false }
-rattler_digest = { version = "0.11.0", default-features = false }
-rattler_networking = { version = "0.11.0", default-features = false }
-rattler_repodata_gateway = { version = "0.11.0", default-features = false, features = [
+rattler = { git = "https://github.com/mamba-org/rattler", branch = "main", default-features = false }
+rattler_conda_types = { git = "https://github.com/mamba-org/rattler", branch = "main", default-features = false }
+rattler_digest = { git = "https://github.com/mamba-org/rattler", branch = "main", default-features = false }
+rattler_networking = { git = "https://github.com/mamba-org/rattler", branch = "main", default-features = false }
+rattler_repodata_gateway = { git = "https://github.com/mamba-org/rattler", branch = "main", default-features = false, features = [
     "sparse",
 ] }
-rattler_shell = { version = "0.11.0", default-features = false, features = [
+rattler_shell = { git = "https://github.com/mamba-org/rattler", branch = "main", default-features = false, features = [
     "sysinfo",
 ] }
-rattler_solve = { version = "0.11.0", default-features = false, features = [
+rattler_solve = { git = "https://github.com/mamba-org/rattler", branch = "main", default-features = false, features = [
     "resolvo",
 ] }
-rattler_virtual_packages = { version = "0.11.0", default-features = false }
-rattler_package_streaming = { version = "0.11.0", default-features = false }
+rattler_virtual_packages = { git = "https://github.com/mamba-org/rattler", branch = "main", default-features = false }
+rattler_package_streaming = { git = "https://github.com/mamba-org/rattler", branch = "main", default-features = false }
 anyhow = "1.0.75"
 walkdir = "2.4.0"
 sha2 = "0.10.8"
@@ -96,16 +96,16 @@ pre-build = [
     "apt-get update && apt-get install --assume-yes libssl-dev:$CROSS_DEB_ARCH",
 ]
 
-[patch.crates-io]
-rattler = { git = "https://github.com/mamba-org/rattler", branch = "main" }
-rattler_conda_types = { git = "https://github.com/mamba-org/rattler", branch = "main" }
-rattler_digest = { git = "https://github.com/mamba-org/rattler", branch = "main" }
-rattler_networking = { git = "https://github.com/mamba-org/rattler", branch = "main" }
-rattler_repodata_gateway = { git = "https://github.com/mamba-org/rattler", branch = "main" }
-rattler_shell = { git = "https://github.com/mamba-org/rattler", branch = "main" }
-rattler_solve = { git = "https://github.com/mamba-org/rattler", branch = "main" }
-rattler_virtual_packages = { git = "https://github.com/mamba-org/rattler", branch = "main" }
-rattler_package_streaming = { git = "https://github.com/mamba-org/rattler", branch = "main" }
+# [patch.crates-io]
+# rattler = { git = "https://github.com/mamba-org/rattler", branch = "main" }
+# rattler_conda_types = { git = "https://github.com/mamba-org/rattler", branch = "main" }
+# rattler_digest = { git = "https://github.com/mamba-org/rattler", branch = "main" }
+# rattler_networking = { git = "https://github.com/mamba-org/rattler", branch = "main" }
+# rattler_repodata_gateway = { git = "https://github.com/mamba-org/rattler", branch = "main" }
+# rattler_shell = { git = "https://github.com/mamba-org/rattler", branch = "main" }
+# rattler_solve = { git = "https://github.com/mamba-org/rattler", branch = "main" }
+# rattler_virtual_packages = { git = "https://github.com/mamba-org/rattler", branch = "main" }
+# rattler_package_streaming = { git = "https://github.com/mamba-org/rattler", branch = "main" }
 
 # rattler = { path = "../rattler/crates/rattler" }
 # rattler_conda_types = { path = "../rattler/crates/rattler_conda_types" }
